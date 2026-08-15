@@ -1,0 +1,1 @@
+# pokepixel-raridades
