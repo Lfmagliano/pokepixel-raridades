@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pokepixel — Raridades
 // @namespace    https://pokepixel.nietore.com/
-// @version      2.18.0
+// @version      2.19.0
 // @description  Conta tentativas e capturas por qualidade (Fraca a Mítica) lendo os eventos de captura do jogo.
 // @author       Lfmagliano
 // @homepageURL  https://github.com/Lfmagliano/pokepixel-raridades
@@ -58,10 +58,18 @@
     const BALL_BY_KEY = BALLS.reduce((m, b) => (m[b.key] = b, m), {});
     const OTHER_BALL_COLOR = '#9aa0a6';
 
+    // Chaves que alterariam o protótipo do objeto se usadas como índice.
+    const BLOCKED_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
+
+    const safeLabel = value => {
+        const label = String(value || '').trim().slice(0, 60);
+        return label && !BLOCKED_KEYS.has(label) ? label : 'Desconhecida';
+    };
+
     function ballKey(itemId, name) {
         const alvo = `${itemId || ''} ${name || ''}`;
         const achou = BALLS.find(b => b.match.test(alvo));
-        return achou ? achou.key : (name || itemId || 'Desconhecida');
+        return achou ? achou.key : safeLabel(name || itemId);
     }
 
     const ALIASES = { mythic: 'mythical', legend: 'legendary', normal: 'common' };
@@ -82,7 +90,7 @@
     const defaultState = () => ({
         attempts: emptyTally(),     // capture.failed + capture.success
         captures: emptyTally(),     // capture.success
-        balls: {},                  // { "Ultra Bola": { attempts, captures } }
+        balls: Object.create(null), // { "Ultra Bola": { attempts, captures } }
         shinyEncounters: 0,
         shinyCaptures: 0,
         accountName: null,
@@ -95,14 +103,41 @@
     let accountId = null;
     let state = null;
 
+    const safeCount = v => Number.isSafeInteger(v) && v >= 0 ? v : 0;
+
+    // O que vem do armazenamento é tratado como não confiável: números viram
+    // inteiros válidos e textos ganham limite de tamanho.
+    function sanitizeState(value) {
+        const limpo = defaultState();
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return limpo;
+
+        for (const k of RARITY_KEYS) {
+            limpo.attempts[k] = safeCount(value.attempts && value.attempts[k]);
+            // Toda captura também incrementa a tentativa, então capturas nunca
+            // podem passar de tentativas.
+            limpo.captures[k] = Math.min(safeCount(value.captures && value.captures[k]),
+                                         limpo.attempts[k]);
+        }
+
+        // Shiny visto e shiny capturado vêm de eventos diferentes e são
+        // independentes: capturar um shiny cuja luta começou antes do script
+        // subir é legítimo, então aqui não cabe limitar um pelo outro.
+        limpo.shinyEncounters = safeCount(value.shinyEncounters);
+        limpo.shinyCaptures = safeCount(value.shinyCaptures);
+
+        limpo.balls = migrateBalls(value.balls);
+        limpo.accountName = typeof value.accountName === 'string'
+            ? value.accountName.slice(0, 60) : null;
+        limpo.startedAt = typeof value.startedAt === 'string'
+            && !Number.isNaN(Date.parse(value.startedAt))
+            ? value.startedAt : limpo.startedAt;
+        return limpo;
+    }
+
     function loadState(id) {
         try {
             const raw = GM_getValue(STORE_PREFIX + id, null);
-            if (raw) {
-                const st = Object.assign(defaultState(), JSON.parse(raw));
-                st.balls = migrateBalls(st.balls);
-                return st;
-            }
+            if (raw) return sanitizeState(JSON.parse(raw));
         } catch (e) { /* dado corrompido: começa limpo */ }
         return defaultState();
     }
@@ -110,17 +145,20 @@
     // Versões anteriores indexavam por capsule_name; reagrupa pela chave
     // canônica para não duplicar a mesma bola sob dois rótulos.
     function migrateBalls(balls) {
-        const out = {};
+        const out = Object.create(null);
         for (const [k, v] of Object.entries(balls || {})) {
             const key = ballKey(k, k);
             const alvo = out[key] || (out[key] = { attempts: 0, captures: 0 });
-            alvo.attempts += v.attempts || 0;
-            alvo.captures += v.captures || 0;
+            const tentativas = safeCount(v && v.attempts);
+            alvo.attempts += tentativas;
+            alvo.captures += Math.min(safeCount(v && v.captures), tentativas);
         }
         return out;
     }
 
     function useAccount(id, name) {
+        id = id == null ? null : String(id).slice(0, 120);
+        name = typeof name === 'string' ? name.slice(0, 60) : null;
         if (!id || accountId === id) {
             if (state && name && state.accountName !== name) {
                 state.accountName = name;
@@ -261,8 +299,9 @@
         if (succeeded) {
             state.captures[rarity]++;
             if (src.is_shiny) state.shinyCaptures++;
-            if (src.captured_by_name && state.accountName !== src.captured_by_name) {
-                state.accountName = src.captured_by_name;
+            if (typeof src.captured_by_name === 'string') {
+                const nome = src.captured_by_name.slice(0, 60);
+                if (state.accountName !== nome) state.accountName = nome;
             }
         }
         return true;
@@ -328,9 +367,14 @@
         const id = p && (p.trainer_id || p.sub || p.user_id || p.uid || p.id);
         const name = p && (p.name || p.trainer_name || p.username);
 
-        // Sem um id utilizável, o token inteiro ainda separa as abas nesta
-        // sessão — melhor isso do que duas contas somando na mesma conta.
-        useAccount(id || ('token:' + token.slice(-24)), name || null);
+        // Sem um id utilizável, deriva um identificador opaco: separa as abas
+        // do mesmo jeito, sem guardar nenhum pedaço reaproveitável do token.
+        let hash = 2166136261;
+        for (let i = 0; i < token.length; i++) {
+            hash ^= token.charCodeAt(i);
+            hash = Math.imul(hash, 16777619);
+        }
+        useAccount(id || ('sessao:' + (hash >>> 0).toString(16).padStart(8, '0')), name || null);
     }
 
     // O catálogo de espécies vem por HTTP, não pelo WebSocket: é a única
@@ -375,7 +419,8 @@
                         handleEvent(msg);
                     } catch (e) {
                         diag.lastError = String(e && e.message || e);
-                        console.error('[Raridades] erro ao processar evento:', e, msg);
+                        console.error('[Raridades] erro ao processar evento:',
+                            msg && msg.type, e);
                         render();
                     }
                 });
@@ -797,6 +842,23 @@
     /* ---- Render ---- */
     const fmt = n => n.toLocaleString('pt-BR');
 
+    // O rótulo de uma bola fora do catálogo vem do servidor e é o único
+    // trecho de origem externa que entra em innerHTML.
+    const escapeHtml = v => String(v).replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    })[c]);
+
+    // Sprites vêm do endpoint de espécies; aceitar só http(s) impede que uma
+    // URL javascript: chegue ao atributo src.
+    function safeImageUrl(value) {
+        try {
+            const url = new URL(String(value), location.href);
+            return url.protocol === 'https:' || url.protocol === 'http:' ? url.href : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
     function renderHunt() {
         if (!els || !els.hunt) return;
         if (!hunt) { els.hunt.classList.remove('pp-on'); return; }
@@ -804,7 +866,7 @@
         els.hunt.classList.add('pp-on');
         els.huntName.textContent = hunt.name;
 
-        const alvo = showShiny ? hunt.shinySprite : hunt.sprite;
+        const alvo = safeImageUrl(showShiny ? hunt.shinySprite : hunt.sprite);
         if (alvo) {
             // Reatribuir src recarregaria a imagem; só troca quando muda.
             if (els.huntImg.getAttribute('src') !== alvo) els.huntImg.setAttribute('src', alvo);
@@ -853,7 +915,7 @@
             <div class="pp-rt-row${o.extraClass || ''}">
                 <span class="pp-rt-badge" style="color:${color};
                       box-shadow: 0 0 9px ${color}59, inset 0 0 9px ${color}1f;
-                      text-shadow: 0 0 7px ${color}8c;">${o.icon || ''}${label}</span>
+                      text-shadow: 0 0 7px ${color}8c;">${o.icon || ''}${escapeHtml(label)}</span>
                 <div class="pp-rt-num ${att ? '' : 'pp-rt-muted'}">${vazio ? '—' : fmt(att)}</div>
                 <div class="pp-rt-num ${cap ? '' : 'pp-rt-muted'}" style="${cap ? 'color:#54d97c' : ''}">${vazio ? '—' : fmt(cap)}</div>
                 <div class="pp-rt-rate">
