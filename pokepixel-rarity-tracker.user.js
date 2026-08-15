@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pokepixel — Raridades
 // @namespace    https://pokepixel.nietore.com/
-// @version      2.27.0
+// @version      2.32.0
 // @description  Conta tentativas e capturas por qualidade (Fraca a Mítica) lendo os eventos de captura do jogo.
 // @author       Lfmagliano
 // @homepageURL  https://github.com/Lfmagliano/pokepixel-raridades
@@ -98,6 +98,7 @@
         ['spe', 'IV Velocidade'],
     ];
     const LOG_PAGE = 6;         // linhas por página, para o painel não crescer
+    const HUNTS_CAP = 40;       // hunts guardadas; as mais antigas saem
 
     const STORE_PREFIX = 'pokepixel_rarity_tracker_v2:';
     const POS_KEY = 'pokepixel_rarity_tracker_fab';   // posição do botão é global
@@ -108,6 +109,7 @@
         captures: emptyTally(),     // capture.success
         balls: Object.create(null), // { "Ultra Bola": { attempts, captures } }
         log: [],                    // últimas capturas, da mais recente para a mais antiga
+        hunts: Object.create(null), // chave da hunt -> contadores próprios
         shinyEncounters: 0,
         shinyCaptures: 0,
         accountName: null,
@@ -143,6 +145,24 @@
         limpo.shinyCaptures = safeCount(value.shinyCaptures);
 
         limpo.balls = migrateBalls(value.balls);
+
+        limpo.hunts = Object.create(null);
+        for (const [k, h] of Object.entries(value.hunts || {})) {
+            if (BLOCKED_KEYS.has(k) || !h || typeof h !== 'object') continue;
+            const lim = novaHunt(h.nome, h.sp, h.map);
+            for (const rk of RARITY_KEYS) {
+                lim.attempts[rk] = safeCount(h.attempts && h.attempts[rk]);
+                lim.captures[rk] = Math.min(safeCount(h.captures && h.captures[rk]),
+                                            lim.attempts[rk]);
+            }
+            lim.balls = migrateBalls(h.balls);
+            lim.shinyEncounters = safeCount(h.shinyEncounters);
+            lim.shinyCaptures = safeCount(h.shinyCaptures);
+            lim.desde = typeof h.desde === 'string' && !Number.isNaN(Date.parse(h.desde))
+                ? h.desde : lim.desde;
+            lim.ultimo = safeCount(h.ultimo) || lim.ultimo;
+            limpo.hunts[String(k).slice(0, 80)] = lim;
+        }
         limpo.log = Array.isArray(value.log)
             ? value.log.filter(e => e && typeof e === 'object').slice(0, LOG_CAP).map(e => ({
                 sp: typeof e.sp === 'string' ? e.sp.slice(0, 40) : '',
@@ -161,6 +181,7 @@
                 bola: typeof e.bola === 'string' ? e.bola.slice(0, 40) : '',
                 sold: !!e.sold,
                 shiny: !!e.shiny,
+                h: typeof e.h === 'string' ? e.h.slice(0, 80) : '',
                 at: typeof e.at === 'string' ? e.at.slice(0, 40) : '',
             }))
             : [];
@@ -277,6 +298,38 @@
     const prettify = id => String(id).split(/[-_]/)
         .map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
 
+    // Uma hunt guarda os mesmos contadores do total, só que restritos ao mapa.
+    const novaHunt = (nome, sp, map) => ({
+        nome: typeof nome === 'string' ? nome.slice(0, 40) : '?',
+        sp: typeof sp === 'string' ? sp.slice(0, 40) : '',
+        map: map == null ? '' : String(map).slice(0, 20),
+        attempts: emptyTally(),
+        captures: emptyTally(),
+        balls: Object.create(null),
+        shinyEncounters: 0,
+        shinyCaptures: 0,
+        desde: new Date().toISOString(),
+        ultimo: Date.now(),
+    });
+
+    // Hunt em que as bolas estão sendo gastas agora.
+    let huntAtual = null;
+
+    // Sair da caçada dispara um POST /stop — é o sinal direto e imediato.
+    // A inatividade fica como reserva: recarregar a página já na cidade não
+    // gera nenhum stop para observar.
+    const HUNT_INATIVA_MS = 60000;
+    let ultimoCombate = 0;
+    let cacadaEncerrada = false;
+
+    function encerrarHunt() {
+        huntAtual = null;
+        hunt = null;
+        huntKey = null;
+        ultimoCombate = 0;
+        render();
+    }
+
     function markQuality(q) {
         const r = normalize(q);
         if (!r && typeof q === 'string') diag.unknownQuality.add(q);
@@ -286,6 +339,11 @@
     function onCombatStarted(data) {
         const enemy = data && data.enemy;
         if (!enemy || !state) return;
+
+        // Antes da deduplicação: um combat.started repetido no mesmo spawn não
+        // conta de novo, mas ainda é sinal de que a caçada está viva.
+        ultimoCombate = Date.now();
+        cacadaEncerrada = false;
 
         // Só interessa marcar shiny visto; o que alimenta a taxa é a bola.
         const key = `${enemy.id}|${enemy.created_at}`;
@@ -298,6 +356,30 @@
         // Só refaz o cartão quando a hunt muda de fato; sem isso o sprite
         // seria reatribuído a cada combate e a imagem recarregaria à toa.
         const chave = `${enemy.map_id != null ? enemy.map_id : ''}|${enemy.species_id || ''}`;
+        huntAtual = chave;
+
+        if (!BLOCKED_KEYS.has(chave)) {
+            // Hunt já conhecida continua de onde parou; só a marca de uso muda.
+            if (state.hunts[chave]) {
+                state.hunts[chave].ultimo = Date.now();
+            } else {
+                const sp0 = enemy.species_id ? speciesIndex.get(enemy.species_id) : null;
+                state.hunts[chave] = novaHunt(
+                    (sp0 && sp0.name) || prettify(enemy.species_id || '?'),
+                    enemy.species_id, enemy.map_id);
+
+                // Passando do limite, sai a que está há mais tempo sem uso —
+                // e não a mais antiga, que pode ser justamente a favorita.
+                let chaves = Object.keys(state.hunts);
+                while (chaves.length > HUNTS_CAP) {
+                    const velha = chaves.reduce((a, b) =>
+                        state.hunts[a].ultimo <= state.hunts[b].ultimo ? a : b);
+                    delete state.hunts[velha];
+                    chaves = Object.keys(state.hunts);
+                }
+            }
+        }
+
         if (chave !== huntKey) {
             huntKey = chave;
             showShiny = false;
@@ -314,6 +396,8 @@
 
         if (enemy.is_shiny) {
             state.shinyEncounters++;
+            const h = state.hunts[chave];
+            if (h) h.shinyEncounters++;
             return true;
         }
     }
@@ -327,15 +411,20 @@
         const rarity = markQuality(src.quality);
         if (!rarity) return;
 
-        state.attempts[rarity]++;
-
         const key = ballKey(data.capsule_item_id, data.capsule_name);
-        const ball = state.balls[key] || (state.balls[key] = { attempts: 0, captures: 0 });
-        ball.attempts++;
-        if (succeeded) ball.captures++;
+        const hunt = huntAtual && state.hunts[huntAtual];
+
+        // O combat.started sempre precede as bolas daquele combate, então a
+        // hunt corrente é a dona desta tentativa.
+        for (const alvo of hunt ? [state, hunt] : [state]) {
+            alvo.attempts[rarity]++;
+            const b = alvo.balls[key] || (alvo.balls[key] = { attempts: 0, captures: 0 });
+            b.attempts++;
+            if (succeeded) { alvo.captures[rarity]++; b.captures++; }
+        }
 
         if (succeeded) {
-            state.captures[rarity]++;
+            if (hunt && src.is_shiny) hunt.shinyCaptures++;
             registrarCaptura(data, src, rarity, key);
             if (src.is_shiny) state.shinyCaptures++;
             if (typeof src.captured_by_name === 'string') {
@@ -370,6 +459,7 @@
             nat: String(creature.nature || '').slice(0, 20),
             gen: creature.gender === 'male' || creature.gender === 'female' ? creature.gender : '',
             bola: ballKeyName,
+            h: huntAtual || '',
             sold: !!data.auto_sold,
             shiny: !!creature.is_shiny,
             at: String(creature.captured_at || '').slice(0, 40),
@@ -479,6 +569,17 @@
                     p.then(res => res.clone().json())
                      .then(b => { const d = b && b.data; if (Array.isArray(d)) { indexSpecies(d); render(); } })
                      .catch(() => {});
+                } else if (/\/stop(\?|$)/.test(url)) {
+                    // "Voltar à cidade" encerra a caçada. É o sinal exato de
+                    // que não há mais hunt ativa, sem depender de espera.
+                    p.then(() => { encerrarHunt(); }).catch(() => {});
+                } else if (/\/stop(\?|$)/.test(url)) {
+                    // Encerrou a caçada: o cartão deixa de apontar um mapa.
+                    p.then(() => {
+                        cacadaEncerrada = true;
+                        huntAtual = null;
+                        renderHunt();
+                    }).catch(() => {});
                 } else if (/\/listings(\?|$)/.test(url)) {
                     p.then(res => res.clone().json())
                      .then(b => { const d = b && b.data; if (Array.isArray(d)) indexListings(d); })
@@ -605,6 +706,9 @@
         display: none; align-items: center; gap: 14px;
         margin: 11px 20px 0; padding: 9px 13px;
         background: #16161a; border: 1px solid #26262e; border-radius: 10px;
+        /* Altura presa no sprite: assim o bloco do perfil, que fica à direita,
+           nunca faz o cartão crescer e empurrar o painel. */
+        height: 62px; box-sizing: border-box; overflow: hidden;
     }
     #pp-rt-hunt.pp-on { display: flex; }
     #pp-rt-hunt-btn {
@@ -617,6 +721,25 @@
         image-rendering: pixelated;   /* sprites do jogo são pixel art */
     }
     #pp-rt-hunt-hint { color: #55555f; font-size: 11px; }
+    #pp-rt-perfil-box { margin-left: auto; text-align: right; flex: none; }
+    #pp-rt-perfil-label {
+        display: block; margin-bottom: 4px; color: #7a7a86;
+        font-size: 9.5px; letter-spacing: .12em; text-transform: uppercase;
+    }
+    /* O sprite fica junto do seletor, e não do "hunt atual": sem isso, o
+       Pokémon exibido seria o da caçada enquanto os números são de outro. */
+    #pp-rt-perfil-row { display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
+    #pp-rt-perfil-img {
+        width: 24px; height: 24px; flex: none; object-fit: contain;
+        image-rendering: pixelated; display: none;
+    }
+    #pp-rt-perfil-img.pp-on { display: block; }
+    #pp-rt-perfil {
+        background: #101014; border: 1px solid #33333c; border-radius: 8px;
+        color: #d9b665; padding: 6px 9px; max-width: 200px;
+        font: 500 12px ui-sans-serif, system-ui, sans-serif;
+    }
+    #pp-rt-perfil:focus-visible { outline: 2px solid #d9b665; outline-offset: 1px; }
     #pp-rt-hunt-label {
         margin: 0 0 2px; color: #7a7a86; font-size: 10.5px;
         letter-spacing: .12em; text-transform: uppercase;
@@ -842,6 +965,7 @@
         background: #16161a; border: 1px solid #33333c; color: #b9b9c2;
         padding: 8px 13px; border-radius: 8px; cursor: pointer; flex: none;
         font-size: 12px; letter-spacing: .06em; text-transform: uppercase;
+        max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
     #pp-rt-reset:hover { border-color: #6b4a4a; color: #f0a5a5; }
 
@@ -858,6 +982,11 @@
     let els = null;
     let view = 'rarity';   // 'rarity' | 'ball' | 'log'
     let logPage = 0;
+    let perfilAtivo = '';  // '' = todas as hunts somadas
+
+    // Os três painéis leem daqui: o total da conta ou uma hunt específica.
+    const dadosAtivos = () =>
+        (perfilAtivo && state && state.hunts[perfilAtivo]) || state;
 
     function buildUI() {
         const style = document.createElement('style');
@@ -893,6 +1022,13 @@
                         <p id="pp-rt-hunt-name"></p>
                         <div id="pp-rt-hunt-meta">
                             <span id="pp-rt-hunt-hint">clique no sprite para ver o shiny</span>
+                        </div>
+                    </div>
+                    <div id="pp-rt-perfil-box">
+                        <label id="pp-rt-perfil-label" for="pp-rt-perfil">Mostrando estatísticas</label>
+                        <div id="pp-rt-perfil-row">
+                            <img id="pp-rt-perfil-img" alt="" />
+                            <select id="pp-rt-perfil"></select>
                         </div>
                     </div>
                 </div>
@@ -963,6 +1099,10 @@
             huntName: overlay.querySelector('#pp-rt-hunt-name'),
             huntHint: overlay.querySelector('#pp-rt-hunt-hint'),
             huntBtn: overlay.querySelector('#pp-rt-hunt-btn'),
+            perfil: overlay.querySelector('#pp-rt-perfil'),
+            perfilLabel: overlay.querySelector('#pp-rt-perfil-label'),
+            perfilImg: overlay.querySelector('#pp-rt-perfil-img'),
+            reset: overlay.querySelector('#pp-rt-reset'),
             panel: overlay.querySelector('#pp-rt-panel'),
             tAtt: overlay.querySelector('#pp-rt-t-att'),
             tCap: overlay.querySelector('#pp-rt-t-cap'),
@@ -1037,22 +1177,59 @@
             open();
         });
 
+        els.perfil.addEventListener('change', () => {
+            perfilAtivo = els.perfil.value;
+            logPage = 0;
+            render();
+        });
+
         els.huntBtn.addEventListener('click', () => {
             if (!hunt || !hunt.shinySprite) return;
             showShiny = !showShiny;
             renderHunt();
         });
 
-        overlay.querySelector('#pp-rt-reset').addEventListener('click', () => {
+        els.reset.addEventListener('click', () => {
             if (!state) return;
-            const quem = state.accountName ? `da conta ${state.accountName}` : 'desta conta';
-            if (!confirm(`Zerar os contadores ${quem}? A outra aba não é afetada, e seu progresso no jogo também não.`)) return;
-            const name = state.accountName;
-            state = defaultState();
-            state.accountName = name;
+            const h = perfilAtivo && state.hunts[perfilAtivo];
+
+            if (h) {
+                if (!confirm(`Zerar os contadores da hunt ${h.nome}? `
+                    + 'Esses números também saem do total, e as outras hunts não são afetadas.')) return;
+
+                // Subtrai do total o que pertencia a esta hunt: sem isso, o
+                // total guardaria números que você não vê em lugar nenhum.
+                for (const k of RARITY_KEYS) {
+                    state.attempts[k] = Math.max(0, state.attempts[k] - h.attempts[k]);
+                    state.captures[k] = Math.max(0, state.captures[k] - h.captures[k]);
+                }
+                for (const [bk, bv] of Object.entries(h.balls)) {
+                    const g = state.balls[bk];
+                    if (!g) continue;
+                    g.attempts = Math.max(0, g.attempts - bv.attempts);
+                    g.captures = Math.max(0, g.captures - bv.captures);
+                }
+                state.shinyEncounters = Math.max(0, state.shinyEncounters - h.shinyEncounters);
+                state.shinyCaptures = Math.max(0, state.shinyCaptures - h.shinyCaptures);
+                state.log = state.log.filter(e => e.h !== perfilAtivo);
+
+                const zerada = novaHunt(h.nome, h.sp, h.map);
+                zerada.ultimo = h.ultimo;
+                state.hunts[perfilAtivo] = zerada;
+            } else {
+                const quem = state.accountName ? `da conta ${state.accountName}` : 'desta conta';
+                if (!confirm(`Zerar TODOS os contadores ${quem}, incluindo todas as hunts? `
+                    + 'A outra aba não é afetada, e seu progresso no jogo também não.')) return;
+                const name = state.accountName;
+                state = defaultState();
+                state.accountName = name;
+                perfilAtivo = '';
+                seenCombat.clear();
+                diag.gaps = 0;
+            }
+
             logPage = 0;
-            seenCombat.clear();
-            diag.gaps = 0;
+            if (els.perfil) els.perfil.__pp = null;
             save();
             render();
         });
@@ -1063,6 +1240,13 @@
         });
 
         ligarMercado();
+
+        // Sem evento novo, nada dispararia o redesenho; esta checagem leve faz
+        // o cartão passar para "sem caçada" quando os combates cessam.
+        setInterval(() => {
+            if (els.overlay.classList.contains('pp-open')) renderHunt();
+        }, 5000);
+
         render();
     }
 
@@ -1170,9 +1354,22 @@
 
     function renderHunt() {
         if (!els || !els.hunt) return;
-        if (!hunt) { els.hunt.classList.remove('pp-on'); return; }
 
+        // O cartão nunca some: o seletor de estatísticas mora nele.
         els.hunt.classList.add('pp-on');
+
+        const parado = !hunt || cacadaEncerrada
+            || Date.now() - ultimoCombate > HUNT_INATIVA_MS;
+        if (parado) {
+            // Sem combates chegando. Pode ser cidade, caçada pausada ou troca
+            // de mapa — como não dá para distinguir, o texto vale para todos.
+            els.huntName.textContent = 'Nenhuma caçada em andamento';
+            els.huntHint.textContent = 'os contadores seguem guardados';
+            els.huntHint.style.color = '#55555f';
+            els.huntBtn.style.display = 'none';
+            return;
+        }
+
         els.huntName.textContent = hunt.name;
 
         const alvo = safeImageUrl(showShiny ? hunt.shinySprite : hunt.sprite);
@@ -1195,6 +1392,58 @@
     const iconeBola = b => `<span class="pp-rt-ball" style="--pp-band:${b.band};`
         + `background:linear-gradient(to bottom,${b.top} 0 44%,${b.band} 44% 56%,${b.bottom} 56% 100%)"></span>`;
 
+    // Lista de perfis: o total e cada hunt vista, da mais movimentada para a
+    // menos. Nomes repetidos ganham o mapa para não ficarem ambíguos.
+    function renderPerfis() {
+        const chaves = Object.keys(state.hunts).sort((a, b) => {
+            const A = state.hunts[a], B = state.hunts[b];
+            const sa = RARITY_KEYS.reduce((x, k) => x + A.attempts[k], 0);
+            const sb = RARITY_KEYS.reduce((x, k) => x + B.attempts[k], 0);
+            return sb - sa;
+        });
+
+        const contagem = Object.create(null);
+        for (const k of chaves) {
+            const n = state.hunts[k].nome;
+            contagem[n] = (contagem[n] || 0) + 1;
+        }
+
+        const assinatura = perfilAtivo + '|' + chaves.join(',');
+        if (els.perfil.__pp === assinatura) return;   // nada mudou: não redesenha
+        els.perfil.__pp = assinatura;
+
+        const opcoes = [['', 'Todas as hunts']].concat(chaves.map(k => {
+            const h = state.hunts[k];
+            const rotulo = contagem[h.nome] > 1 && h.map
+                ? `${h.nome} · mapa ${h.map}` : h.nome;
+            return [k, rotulo];
+        }));
+
+        els.perfil.innerHTML = opcoes.map(([v, r]) =>
+            `<option value="${escapeHtml(v)}">${escapeHtml(r)}</option>`).join('');
+
+        // A hunt selecionada pode ter saído do limite guardado.
+        if (perfilAtivo && !state.hunts[perfilAtivo]) perfilAtivo = '';
+        els.perfil.value = perfilAtivo;
+    }
+
+    // Deixa explícito de quem são os números na tela.
+    function renderRotuloPerfil() {
+        const h = perfilAtivo && state.hunts[perfilAtivo];
+        els.perfilLabel.textContent = h
+            ? 'Mostrando estatísticas de'
+            : 'Mostrando estatísticas gerais';
+
+        const url = h && spriteDe({ sp: h.sp, shiny: false });
+        if (url) {
+            if (els.perfilImg.getAttribute('src') !== url) els.perfilImg.setAttribute('src', url);
+            els.perfilImg.alt = h.nome;
+            els.perfilImg.classList.add('pp-on');
+        } else {
+            els.perfilImg.classList.remove('pp-on');
+        }
+    }
+
     function renderLog() {
         els.hrow.style.display = '';
         els.hrow.classList.add('pp-rt-hrow--log');
@@ -1211,7 +1460,8 @@
         const fs = els.fSold.value;
 
         const lista = state.log.filter(e =>
-            (!fq || e.q === fq)
+            (!perfilAtivo || e.h === perfilAtivo)
+            && (!fq || e.q === fq)
             && e.iv >= (Number.isFinite(min) ? min : 0)
             && e.iv <= (Number.isFinite(max) ? max : IV_MAX)
             && (!fs || (fs === 'sold' ? e.sold : !e.sold)));
@@ -1460,12 +1710,16 @@
             ? `Conta: ${state.accountName}`
             : `Conta ${String(accountId).slice(0, 8)}`;
 
-        const totalAtt = RARITY_KEYS.reduce((s, k) => s + state.attempts[k], 0);
-        const totalCap = RARITY_KEYS.reduce((s, k) => s + state.captures[k], 0);
+        renderPerfis();
+        renderRotuloPerfil();
+        const D = dadosAtivos();
+
+        const totalAtt = RARITY_KEYS.reduce((s, k) => s + D.attempts[k], 0);
+        const totalCap = RARITY_KEYS.reduce((s, k) => s + D.captures[k], 0);
 
         els.tAtt.textContent = fmt(totalAtt);
         els.tCap.textContent = fmt(totalCap);
-        els.tShi.textContent = `${fmt(state.shinyCaptures)} / ${fmt(state.shinyEncounters)}`;
+        els.tShi.textContent = `${fmt(D.shinyCaptures)} / ${fmt(D.shinyEncounters)}`;
 
         const row = (label, color, att, cap, opts) => {
             const o = opts || {};
@@ -1492,8 +1746,8 @@
         // As duas abas têm quantidades diferentes de linhas (7 raridades
         // contra 5 pokébolas). A menor é preenchida com linhas invisíveis
         // para que trocar de aba não mude a altura do painel.
-        const extras = Object.keys(state.balls)
-            .filter(k => !BALL_BY_KEY[k] && state.balls[k].attempts > 0);
+        const extras = Object.keys(D.balls)
+            .filter(k => !BALL_BY_KEY[k] && D.balls[k].attempts > 0);
         const maxLinhas = Math.max(RARITIES.length, BALLS.length + extras.length);
         const preencher = n => n > 0
             ? row('—', '#000000', 0, 0, { extraClass: ' pp-rt-spacer' }).repeat(n)
@@ -1514,13 +1768,13 @@
             els.head1.textContent = 'Pokébola';
 
             const vazia = { attempts: 0, captures: 0 };
-            const chaves = Object.keys(state.balls);
+            const chaves = Object.keys(D.balls);
 
-            const tAtt = chaves.reduce((a, k) => a + state.balls[k].attempts, 0);
-            const tCap = chaves.reduce((a, k) => a + state.balls[k].captures, 0);
+            const tAtt = chaves.reduce((a, k) => a + D.balls[k].attempts, 0);
+            const tCap = chaves.reduce((a, k) => a + D.balls[k].captures, 0);
 
             const linhas = BALLS.map(b => {
-                const d = state.balls[b.key] || vazia;
+                const d = D.balls[b.key] || vazia;
                 return row(b.label, b.color, d.attempts, d.captures,
                     { dashWhenEmpty: true, icon: iconeBola(b) });
             });
@@ -1528,9 +1782,9 @@
             // Qualquer bola fora do catálogo (ex.: recompensa de evento) entra
             // depois, e só se tiver sido usada.
             extras.slice()
-                .sort((a, b) => state.balls[b].attempts - state.balls[a].attempts)
+                .sort((a, b) => D.balls[b].attempts - D.balls[a].attempts)
                 .forEach(k => linhas.push(
-                    row(k, OTHER_BALL_COLOR, state.balls[k].attempts, state.balls[k].captures)));
+                    row(k, OTHER_BALL_COLOR, D.balls[k].attempts, D.balls[k].captures)));
 
             els.rows.innerHTML =
                 row('Todas', ALL_ROW.color, tAtt, tCap, { extraClass: ' pp-rt-row--all' })
@@ -1543,24 +1797,31 @@
                 + '<div>Capturas</div><div>Taxa de captura</div>';
             els.head1 = els.hrow.querySelector('#pp-rt-h1');
 
-            const sum = key => RARITY_KEYS.reduce((acc, k) => acc + state[key][k], 0);
+            const sum = key => RARITY_KEYS.reduce((acc, k) => acc + D[key][k], 0);
             const allAtt = sum('attempts');
             const allCap = sum('captures');
 
             els.rows.innerHTML =
                 row(ALL_ROW.label, ALL_ROW.color, allAtt, allCap, { extraClass: ' pp-rt-row--all' })
                 + RARITIES.map(r =>
-                    row(r.label, r.color, state.attempts[r.key], state.captures[r.key])
+                    row(r.label, r.color, D.attempts[r.key], D.captures[r.key])
                 ).join('')
                 + preencher(maxLinhas - RARITIES.length);
         }
 
-        const since = new Date(state.startedAt).toLocaleString('pt-BR');
+        const since = new Date(D === state ? state.startedAt : D.desde).toLocaleString('pt-BR');
         if (els.fab.__ppSetTitle) els.fab.__ppSetTitle(state.accountName);
 
+        const huntSel = perfilAtivo && state.hunts[perfilAtivo];
+        els.reset.textContent = huntSel ? `Zerar ${huntSel.nome}` : 'Zerar tudo';
+
+        const nHunts = Object.keys(state.hunts).length;
+        const aviso = nHunts
+            ? ` · guarda ${fmt(HUNTS_CAP)} hunts; passando disso, sai a menos usada`
+            : '';
         els.note.textContent = totalAtt === 0
             ? 'Nenhuma pokébola registrada ainda. A conta começa quando a primeira for jogada.'
-            : `Contando desde ${since}.`;
+            : `Contando desde ${since}${aviso}`;
 
         const parts = [];
         if (!diag.connected) parts.push('WebSocket não detectado — recarregue a página');
