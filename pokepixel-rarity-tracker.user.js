@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pokepixel — Raridades
 // @namespace    https://pokepixel.nietore.com/
-// @version      2.19.0
+// @version      2.27.0
 // @description  Conta tentativas e capturas por qualidade (Fraca a Mítica) lendo os eventos de captura do jogo.
 // @author       Lfmagliano
 // @homepageURL  https://github.com/Lfmagliano/pokepixel-raridades
@@ -83,6 +83,22 @@
     /* ---------------------------------------------------------------
      * Estado persistido
      * ------------------------------------------------------------- */
+    const LOG_CAP = 100;        // limite do registro; o armazenamento não é infinito
+    const IV_MAX = 186;         // 31 por atributo, seis atributos
+    const IV_STAT_MAX = 31;
+    // Ordem e rótulos iguais aos do painel de genética do jogo
+    const BAT_STATS = ['HP máximo', 'Ataque', 'Defesa',
+                       'Atq. Especial', 'Def. Especial', 'Velocidade'];
+    const IV_STATS = [
+        ['hp',  'IV HP'],
+        ['atk', 'IV Ataque'],
+        ['def', 'IV Defesa'],
+        ['spa', 'IV Ataque Especial'],
+        ['spd', 'IV Defesa Especial'],
+        ['spe', 'IV Velocidade'],
+    ];
+    const LOG_PAGE = 6;         // linhas por página, para o painel não crescer
+
     const STORE_PREFIX = 'pokepixel_rarity_tracker_v2:';
     const POS_KEY = 'pokepixel_rarity_tracker_fab';   // posição do botão é global
     const emptyTally = () => RARITY_KEYS.reduce((acc, k) => (acc[k] = 0, acc), {});
@@ -91,6 +107,7 @@
         attempts: emptyTally(),     // capture.failed + capture.success
         captures: emptyTally(),     // capture.success
         balls: Object.create(null), // { "Ultra Bola": { attempts, captures } }
+        log: [],                    // últimas capturas, da mais recente para a mais antiga
         shinyEncounters: 0,
         shinyCaptures: 0,
         accountName: null,
@@ -126,6 +143,27 @@
         limpo.shinyCaptures = safeCount(value.shinyCaptures);
 
         limpo.balls = migrateBalls(value.balls);
+        limpo.log = Array.isArray(value.log)
+            ? value.log.filter(e => e && typeof e === 'object').slice(0, LOG_CAP).map(e => ({
+                sp: typeof e.sp === 'string' ? e.sp.slice(0, 40) : '',
+                nome: typeof e.nome === 'string' ? e.nome.slice(0, 40) : '?',
+                q: RARITY_KEYS.includes(e.q) ? e.q : 'weak',
+                lvl: safeCount(e.lvl),
+                iv: Math.min(safeCount(e.iv), IV_MAX),
+                det: Array.isArray(e.det) && e.det.length === IV_STATS.length
+                    ? e.det.map(v => Math.min(safeCount(v), IV_STAT_MAX)) : null,
+                mult: Number.isFinite(e.mult) && e.mult >= 0 ? e.mult : 0,
+                bat: Array.isArray(e.bat) && e.bat.length === IV_STATS.length
+                    ? e.bat.map(v => safeCount(v)) : null,
+                poder: safeCount(e.poder),
+                nat: typeof e.nat === 'string' ? e.nat.slice(0, 20) : '',
+                gen: e.gen === 'male' || e.gen === 'female' ? e.gen : '',
+                bola: typeof e.bola === 'string' ? e.bola.slice(0, 40) : '',
+                sold: !!e.sold,
+                shiny: !!e.shiny,
+                at: typeof e.at === 'string' ? e.at.slice(0, 40) : '',
+            }))
+            : [];
         limpo.accountName = typeof value.accountName === 'string'
             ? value.accountName.slice(0, 60) : null;
         limpo.startedAt = typeof value.startedAt === 'string'
@@ -298,6 +336,7 @@
 
         if (succeeded) {
             state.captures[rarity]++;
+            registrarCaptura(data, src, rarity, key);
             if (src.is_shiny) state.shinyCaptures++;
             if (typeof src.captured_by_name === 'string') {
                 const nome = src.captured_by_name.slice(0, 60);
@@ -305,6 +344,38 @@
             }
         }
         return true;
+    }
+
+    // Guarda o detalhe de cada captura. O evento já traz tudo: IVs, nature,
+    // gênero, nível e se a venda automática levou o Pokémon.
+    function registrarCaptura(data, creature, rarity, ballKeyName) {
+        const ivs = creature.ivs && typeof creature.ivs === 'object' ? creature.ivs : {};
+        // Guardados como lista na ordem de IV_STATS: ocupa menos que um objeto
+        // e o registro precisa caber no armazenamento.
+        const det = IV_STATS.map(([k]) => Math.min(Number(ivs[k]) || 0, IV_STAT_MAX));
+        const ivTotal = det.reduce((soma, v) => soma + v, 0);
+
+        state.log.unshift({
+            sp: String(creature.species_id || '').slice(0, 40),
+            nome: String(creature.species_name || creature.species_id || '?').slice(0, 40),
+            q: rarity,
+            lvl: Number(creature.level) || 0,
+            iv: Math.min(ivTotal, IV_MAX),
+            det,
+            mult: Number(creature.quality_multiplier) || 0,
+            // Atributos de batalha, na mesma ordem de IV_STATS
+            bat: [creature.max_hp, creature.atk, creature.def,
+                  creature.spa, creature.spd, creature.spe].map(v => Number(v) || 0),
+            poder: Number(creature.power) || 0,
+            nat: String(creature.nature || '').slice(0, 20),
+            gen: creature.gender === 'male' || creature.gender === 'female' ? creature.gender : '',
+            bola: ballKeyName,
+            sold: !!data.auto_sold,
+            shiny: !!creature.is_shiny,
+            at: String(creature.captured_at || '').slice(0, 40),
+        });
+
+        if (state.log.length > LOG_CAP) state.log.length = LOG_CAP;
     }
 
     function handleEvent(msg) {
@@ -377,6 +448,24 @@
         useAccount(id || ('sessao:' + (hash >>> 0).toString(16).padStart(8, '0')), name || null);
     }
 
+    // Anúncios do mercado: id do anúncio -> criatura. O card no DOM traz
+    // data-listing-id, que casa com o id daqui — por isso a correspondência
+    // é exata, sem depender de nome nem dos números na tela.
+    const listings = new Map();
+    const LISTINGS_CAP = 4000;
+
+    function indexListings(list) {
+        for (const l of list) {
+            if (!l || !l.id || l.kind !== 'pokemon' || !l.creature) continue;
+            listings.set(l.id, l.creature);
+        }
+        // O mercado é paginado; o índice acumula o que já passou, mas não
+        // cresce sem limite.
+        while (listings.size > LISTINGS_CAP) {
+            listings.delete(listings.keys().next().value);
+        }
+    }
+
     // O catálogo de espécies vem por HTTP, não pelo WebSocket: é a única
     // chamada que ainda interessa interceptar.
     const origFetch = W.fetch;
@@ -389,6 +478,10 @@
                 if (/\/species(\?|$)/.test(url)) {
                     p.then(res => res.clone().json())
                      .then(b => { const d = b && b.data; if (Array.isArray(d)) { indexSpecies(d); render(); } })
+                     .catch(() => {});
+                } else if (/\/listings(\?|$)/.test(url)) {
+                    p.then(res => res.clone().json())
+                     .then(b => { const d = b && b.data; if (Array.isArray(d)) indexListings(d); })
                      .catch(() => {});
                 }
             } catch (e) { /* nunca atrapalha o jogo */ }
@@ -533,7 +626,7 @@
     .pp-rt-shiny { color: #4fc6ea; font-size: 12px; font-weight: 500; }
 
     .pp-rt-tabs {
-        display: grid; grid-template-columns: 1fr 1fr;
+        display: grid; grid-template-columns: 1fr 1fr 1fr;
         gap: 9px; padding: 9px 20px 3px;
     }
     .pp-rt-tab {
@@ -548,7 +641,149 @@
     }
     .pp-rt-tab:focus-visible { outline: 2px solid #d9b665; outline-offset: 2px; }
 
-    #pp-rt-table { padding: 6px 20px 2px; }
+    /* Filtros ficam no HTML fixo e só são exibidos na aba de capturas: se
+       fossem recriados a cada render, o campo perderia o foco na digitação. */
+    #pp-rt-filters {
+        display: none; grid-template-columns: 1.3fr .8fr .8fr 1.1fr;
+        gap: 8px; padding: 6px 20px 0; align-items: end;
+        height: 56px; box-sizing: border-box;
+    }
+    #pp-rt-filters.pp-on { display: grid; }
+    .pp-rt-field { display: flex; flex-direction: column; gap: 4px; }
+    .pp-rt-field label {
+        color: #7a7a86; font-size: 9.5px; letter-spacing: .1em; text-transform: uppercase;
+    }
+    .pp-rt-field select, .pp-rt-field input {
+        background: #16161a; border: 1px solid #26262e; border-radius: 8px;
+        color: #e6e6ea; padding: 7px 9px; font: 400 12px ui-sans-serif, system-ui, sans-serif;
+    }
+    .pp-rt-field select:focus-visible, .pp-rt-field input:focus-visible {
+        outline: 2px solid #d9b665; outline-offset: 1px;
+    }
+    .pp-rt-iv { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+
+    #pp-rt-pager {
+        display: none; align-items: center; justify-content: space-between;
+        gap: 10px; padding: 3px 20px 0;
+        height: 44px; box-sizing: border-box;
+    }
+    #pp-rt-pager.pp-on { display: flex; }
+    #pp-rt-pager span { color: #7a7a86; font-size: 11px; font-variant-numeric: tabular-nums; }
+    #pp-rt-pager div { display: flex; gap: 6px; }
+    #pp-rt-pager button {
+        background: #16161a; border: 1px solid #26262e; border-radius: 7px;
+        color: #b9b9c2; padding: 5px 11px; cursor: pointer; font-size: 12px;
+    }
+    #pp-rt-pager button:disabled { color: #3c3c44; cursor: default; }
+    #pp-rt-pager button:not(:disabled):hover { border-color: #d9b665; color: #d9b665; }
+
+    /* Cada captura é uma linha só. A especificidade dupla vence a regra de
+       colunas da tabela, que aparece depois no arquivo. */
+    /* Cabeçalho e linhas compartilham a mesma grade para os rótulos ficarem
+       alinhados. A especificidade dupla vence a grade padrão da tabela. */
+    .pp-rt-hrow.pp-rt-hrow--log,
+    .pp-rt-row.pp-rt-row--log {
+        display: grid;
+        grid-template-columns: 1.6fr .9fr .75fr .9fr .95fr 1fr .85fr;
+        gap: 14px; align-items: center;
+    }
+    .pp-rt-row.pp-rt-row--log { padding: 7px 14px; height: 42px; }
+
+    .pp-rt-cap-nome {
+        display: flex; align-items: center; gap: 9px; min-width: 0;
+        font-weight: 500; font-size: 13px;
+    }
+    .pp-rt-cap-nome span {
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .pp-rt-cap-img {
+        width: 26px; height: 26px; flex: none; object-fit: contain; image-rendering: pixelated;
+    }
+    .pp-rt-cap-iv { font-variant-numeric: tabular-nums; font-size: 12.5px; }
+    .pp-rt-cap-nat { font-size: 12px; color: #b9b9c2; text-transform: capitalize; }
+    .pp-rt-cap-gen { font-size: 12px; color: #b9b9c2; white-space: nowrap; }
+    .pp-rt-cap-bola {
+        display: flex; align-items: center; font-size: 12px; color: #b9b9c2;
+        white-space: nowrap; min-width: 0;
+    }
+    .pp-rt-cap-dest { font-size: 12px; text-align: right; }
+    .pp-rt-empty {
+        color: #55555f; font-size: 13px; height: 282px;
+        display: flex; align-items: center; justify-content: center;
+    }
+
+    #pp-rt-table { padding: 6px 20px 2px; position: relative; }
+
+    /* Mini painel de genética, no estilo da tela do jogo. pointer-events:none
+       para que ele nunca roube o hover da própria linha. */
+    #pp-rt-market-tip {
+        position: fixed; z-index: 2147483647; display: none;
+        width: 336px; padding: 0; pointer-events: none; overflow: hidden;
+        background: #0e0e10; border: 1px solid #3a3a44; border-radius: 12px;
+        box-shadow: 0 16px 38px rgba(0,0,0,.72);
+        font-family: ui-sans-serif, system-ui, sans-serif; color: #e6e6ea;
+    }
+    #pp-rt-market-tip.pp-on { display: block; }
+
+    #pp-rt-tip {
+        position: absolute; display: none; z-index: 5; right: 26px;
+        width: 336px; padding: 0; pointer-events: none; overflow: hidden;
+        background: #0e0e10; border: 1px solid #3a3a44; border-radius: 12px;
+        box-shadow: 0 16px 38px rgba(0,0,0,.7);
+    }
+    #pp-rt-tip.pp-on { display: block; }
+
+    /* Cabeçalho: sprite, nome, raridade, multiplicador e poder total */
+    .pp-rt-tip-top {
+        display: flex; align-items: center; gap: 12px;
+        padding: 11px 13px; background: #16161a; border-bottom: 1px solid #26262e;
+    }
+    .pp-rt-tip-sprite {
+        width: 52px; height: 52px; flex: none; object-fit: contain;
+        image-rendering: pixelated; background: #101014;
+        border: 1px solid #26262e; border-radius: 50%; padding: 3px;
+    }
+    .pp-rt-tip-id { flex: 1; min-width: 0; }
+    .pp-rt-tip-id h3 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
+    .pp-rt-tip-tags { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .pp-rt-tip-lvl {
+        background: #1c2b3a; border: 1px solid #2f4a63; color: #7fb6e0;
+        border-radius: 6px; padding: 2px 7px; font-size: 10.5px;
+    }
+    .pp-rt-tip-poder { text-align: right; flex: none; }
+    .pp-rt-tip-poder b { display: block; font-size: 19px; color: #e6e6ea; line-height: 1.1; }
+    .pp-rt-tip-poder span {
+        display: block; color: #7a7a86; font-size: 8.5px;
+        letter-spacing: .1em; text-transform: uppercase;
+    }
+    .pp-rt-tip-mult {
+        display: block; margin-top: 5px; text-align: center;
+        background: #221d12; border: 1px solid #4a3d22; border-radius: 6px;
+        color: #d9b665; padding: 3px 7px; font-size: 10.5px;
+        font-variant-numeric: tabular-nums;
+    }
+
+    /* Duas colunas: atributos de batalha e genética, como no jogo */
+    .pp-rt-tip-cols { display: grid; grid-template-columns: 1fr 1fr; }
+    .pp-rt-tip-col { padding: 10px 13px; }
+    .pp-rt-tip-col + .pp-rt-tip-col { border-left: 1px solid #26262e; }
+    .pp-rt-tip-head {
+        margin: 0 0 7px; color: #d9b665; font-size: 10px;
+        letter-spacing: .1em; text-transform: uppercase;
+    }
+    .pp-rt-stat {
+        display: flex; justify-content: space-between; align-items: baseline;
+        gap: 8px; margin-bottom: 5px; font-size: 11px;
+    }
+    .pp-rt-stat span { color: #8b8b95; }
+    .pp-rt-stat b { color: #e6e6ea; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .pp-rt-tip-total {
+        display: flex; justify-content: space-between; align-items: baseline;
+        padding: 8px 13px; border-top: 1px solid #26262e;
+        font-size: 11.5px; color: #8b8b95;
+    }
+    .pp-rt-tip-total b { color: #e6e6ea; font-variant-numeric: tabular-nums; }
+    .pp-rt-tip-vazio { color: #55555f; font-size: 11px; margin: 0; }
     .pp-rt-hrow, .pp-rt-row {
         display: grid; grid-template-columns: 1.4fr .8fr .8fr 1.7fr;
         gap: 12px; align-items: center;
@@ -556,10 +791,12 @@
     .pp-rt-hrow {
         padding: 7px 14px; color: #7a7a86;
         font-size: 10px; letter-spacing: .1em; text-transform: uppercase;
+        height: 26px; box-sizing: border-box;
     }
     .pp-rt-row {
         background: #16161a; border: 1px solid #26262e; border-radius: 10px;
         padding: 9px 14px; margin-bottom: 5px;
+        height: 42px; box-sizing: border-box;
     }
     .pp-rt-row--all {
         background: #1b1b21; border-color: #3a3a44;
@@ -619,7 +856,8 @@
     `;
 
     let els = null;
-    let view = 'rarity';   // 'rarity' | 'ball'
+    let view = 'rarity';   // 'rarity' | 'ball' | 'log'
+    let logPage = 0;
 
     function buildUI() {
         const style = document.createElement('style');
@@ -666,12 +904,43 @@
                 <div class="pp-rt-tabs">
                     <button class="pp-rt-tab pp-active" type="button" data-view="rarity">Por raridade</button>
                     <button class="pp-rt-tab" type="button" data-view="ball">Por pokébola</button>
+                    <button class="pp-rt-tab" type="button" data-view="log">Capturas</button>
+                </div>
+                <div id="pp-rt-filters">
+                    <div class="pp-rt-field">
+                        <label for="pp-rt-f-q">Raridade</label>
+                        <select id="pp-rt-f-q"><option value="">Todas</option></select>
+                    </div>
+                    <div class="pp-rt-field">
+                        <label for="pp-rt-f-ivmin">IV mínimo</label>
+                        <input id="pp-rt-f-ivmin" type="number" min="0" max="186" placeholder="0" />
+                    </div>
+                    <div class="pp-rt-field">
+                        <label for="pp-rt-f-ivmax">IV máximo</label>
+                        <input id="pp-rt-f-ivmax" type="number" min="0" max="186" placeholder="186" />
+                    </div>
+                    <div class="pp-rt-field">
+                        <label for="pp-rt-f-sold">Destino</label>
+                        <select id="pp-rt-f-sold">
+                            <option value="">Todos</option>
+                            <option value="sold">Vendidos</option>
+                            <option value="kept">Guardados</option>
+                        </select>
+                    </div>
                 </div>
                 <div id="pp-rt-table">
                     <div class="pp-rt-hrow">
                         <div id="pp-rt-h1">Raridade</div><div>Tentativas</div><div>Capturas</div><div>Taxa de captura</div>
                     </div>
                     <div id="pp-rt-rows"></div>
+                    <div id="pp-rt-tip"></div>
+                </div>
+                <div id="pp-rt-pager">
+                    <span id="pp-rt-pager-info"></span>
+                    <div>
+                        <button id="pp-rt-prev" type="button">Anteriores</button>
+                        <button id="pp-rt-next" type="button">Próximas</button>
+                    </div>
                 </div>
                 <div id="pp-rt-foot">
                     <div>
@@ -703,11 +972,49 @@
             tabs: [...overlay.querySelectorAll('.pp-rt-tab')],
             account: overlay.querySelector('#pp-rt-account'),
             diag: overlay.querySelector('#pp-rt-diag'),
+            hrow: overlay.querySelector('.pp-rt-hrow'),
+            tip: overlay.querySelector('#pp-rt-tip'),
+            filters: overlay.querySelector('#pp-rt-filters'),
+            fQ: overlay.querySelector('#pp-rt-f-q'),
+            fIvMin: overlay.querySelector('#pp-rt-f-ivmin'),
+            fIvMax: overlay.querySelector('#pp-rt-f-ivmax'),
+            fSold: overlay.querySelector('#pp-rt-f-sold'),
+            pager: overlay.querySelector('#pp-rt-pager'),
+            pagerInfo: overlay.querySelector('#pp-rt-pager-info'),
+            prev: overlay.querySelector('#pp-rt-prev'),
+            next: overlay.querySelector('#pp-rt-next'),
         };
+
+        // Preenche o filtro de raridade a partir do catálogo
+        RARITIES.forEach(r => {
+            const opt = document.createElement('option');
+            opt.value = r.key;
+            opt.textContent = r.label;
+            els.fQ.appendChild(opt);
+        });
+
+        // Qualquer mudança de filtro volta para a primeira página
+        [els.fQ, els.fIvMin, els.fIvMax, els.fSold].forEach(el => {
+            el.addEventListener('change', () => { logPage = 0; render(); });
+            el.addEventListener('input', () => { logPage = 0; render(); });
+        });
+
+        // Delegação: as linhas são recriadas a cada render, então o ouvinte
+        // fica no contêiner, que é permanente.
+        els.rows.addEventListener('mouseover', ev => {
+            if (view !== 'log') return;
+            const linha = ev.target.closest && ev.target.closest('.pp-rt-row--log[data-i]');
+            if (linha) mostrarTip(linha); else esconderTip();
+        });
+        els.rows.addEventListener('mouseleave', esconderTip);
+
+        els.prev.addEventListener('click', () => { logPage = Math.max(0, logPage - 1); render(); });
+        els.next.addEventListener('click', () => { logPage++; render(); });
 
         els.tabs.forEach(tab => {
             tab.addEventListener('click', () => {
                 view = tab.dataset.view;
+                logPage = 0;
                 els.tabs.forEach(t => t.classList.toggle('pp-active', t === tab));
                 render();
             });
@@ -743,6 +1050,7 @@
             const name = state.accountName;
             state = defaultState();
             state.accountName = name;
+            logPage = 0;
             seenCombat.clear();
             diag.gaps = 0;
             save();
@@ -754,6 +1062,7 @@
             fitPanel();
         });
 
+        ligarMercado();
         render();
     }
 
@@ -880,6 +1189,259 @@
         els.huntHint.style.color = showShiny ? '#4fc6ea' : '#55555f';
     }
 
+    const GENERO = { male: '♂', female: '♀' };
+    const GENERO_NOME = { male: 'Macho ♂', female: 'Fêmea ♀' };
+
+    const iconeBola = b => `<span class="pp-rt-ball" style="--pp-band:${b.band};`
+        + `background:linear-gradient(to bottom,${b.top} 0 44%,${b.band} 44% 56%,${b.bottom} 56% 100%)"></span>`;
+
+    function renderLog() {
+        els.hrow.style.display = '';
+        els.hrow.classList.add('pp-rt-hrow--log');
+        els.hrow.innerHTML = '<div>Pokémon</div><div>Raridade</div><div>IV</div>'
+            + '<div>Natureza</div><div>Gênero</div><div>Pokébola</div>'
+            + '<div style="text-align:right">Destino</div>';
+        esconderTip();
+
+        // Filtros lidos na hora; os campos vivem no HTML fixo justamente para
+        // não perderem o foco a cada redesenho.
+        const fq = els.fQ.value;
+        const min = els.fIvMin.value === '' ? 0 : Number(els.fIvMin.value);
+        const max = els.fIvMax.value === '' ? IV_MAX : Number(els.fIvMax.value);
+        const fs = els.fSold.value;
+
+        const lista = state.log.filter(e =>
+            (!fq || e.q === fq)
+            && e.iv >= (Number.isFinite(min) ? min : 0)
+            && e.iv <= (Number.isFinite(max) ? max : IV_MAX)
+            && (!fs || (fs === 'sold' ? e.sold : !e.sold)));
+
+        const paginas = Math.max(1, Math.ceil(lista.length / LOG_PAGE));
+        if (logPage > paginas - 1) logPage = paginas - 1;
+        const inicio = logPage * LOG_PAGE;
+        const pagina = lista.slice(inicio, inicio + LOG_PAGE);
+
+        if (!lista.length) {
+            els.rows.innerHTML = `<div class="pp-rt-empty">${state.log.length
+                ? 'Nenhuma captura corresponde aos filtros.'
+                : 'Nenhuma captura registrada ainda.'}</div>`;
+        } else {
+            paginaAtual = pagina;
+            els.rows.innerHTML = pagina.map((e, i) => {
+                const r = RARITIES.find(x => x.key === e.q) || RARITIES[0];
+                const bola = BALL_BY_KEY[e.bola];
+                const sp = e.sp && speciesIndex.get(e.sp);
+                const img = safeImageUrl((sp && (e.shiny ? sp.shiny : sp.sprite))
+                    || (e.sp ? `/assets/imported/creatures/${e.sp}/${e.shiny ? 'shiny' : 'front'}.png` : ''));
+
+                // O evento de captura nem sempre traz species_name; o catálogo
+                // de espécies tem o nome correto, e o id serve de reserva.
+                const nome = (sp && sp.name) || prettify(e.nome);
+
+                return `
+                <div class="pp-rt-row pp-rt-row--log" data-i="${i}">
+                    <span class="pp-rt-cap-nome">
+                        ${img ? `<img class="pp-rt-cap-img" src="${escapeHtml(img)}" alt="" />` : ''}
+                        <span>${escapeHtml(nome)}${e.shiny ? ' ✦' : ''}</span>
+                    </span>
+                    <span class="pp-rt-badge" style="color:${r.color};font-size:11px;padding:3px 10px;
+                          box-shadow: 0 0 9px ${r.color}59, inset 0 0 9px ${r.color}1f;
+                          text-shadow: 0 0 7px ${r.color}8c;">${r.label}</span>
+                    <span class="pp-rt-cap-iv">${fmt(e.iv)}<span class="pp-rt-muted">/${IV_MAX}</span></span>
+                    <span class="pp-rt-cap-nat">${escapeHtml(e.nat)}</span>
+                    <span class="pp-rt-cap-gen">${GENERO_NOME[e.gen] || '—'}</span>
+                    <span class="pp-rt-cap-bola">
+                        ${bola ? iconeBola(bola) : ''}${escapeHtml(bola ? bola.label : e.bola)}
+                    </span>
+                    <span class="pp-rt-cap-dest" style="color:${e.sold ? '#8b8b95' : '#54d97c'}">
+                        ${e.sold ? 'Vendido' : 'Guardado'}
+                    </span>
+                </div>`;
+            }).join('')
+            + `<div class="pp-rt-row pp-rt-row--log pp-rt-spacer"></div>`
+                .repeat(Math.max(0, LOG_PAGE - pagina.length));
+        }
+
+        const limite = `mostra as últimas ${fmt(LOG_CAP)} capturas`;
+        els.pagerInfo.textContent = lista.length
+            ? `${fmt(inicio + 1)}–${fmt(inicio + pagina.length)} de ${fmt(lista.length)} · ${limite}`
+            : limite.charAt(0).toUpperCase() + limite.slice(1);
+        els.prev.disabled = logPage === 0;
+        els.next.disabled = inicio + LOG_PAGE >= lista.length;
+    }
+
+    let paginaAtual = [];
+
+    const esconderTip = () => { if (els && els.tip) els.tip.classList.remove('pp-on'); };
+
+    // Sprite de uma entrada: prioriza a URL que veio junto do dado, depois o
+    // catálogo de espécies, e por último o caminho padrão.
+    function spriteDe(e) {
+        const sp = e.sp && speciesIndex.get(e.sp);
+        return safeImageUrl(
+            (e.shiny ? e.spriteS : e.spriteN)
+            || (sp && (e.shiny ? sp.shiny : sp.sprite))
+            || (e.sp ? `/assets/imported/creatures/${e.sp}/${e.shiny ? 'shiny' : 'front'}.png` : ''));
+    }
+
+    // Monta o cartão de detalhes. Usado tanto pelo registro de capturas
+    // quanto pelos anúncios do mercado, que têm os mesmos campos.
+    function tipHtml(e) {
+        const r = RARITIES.find(x => x.key === e.q) || RARITIES[0];
+        const sp = e.sp && speciesIndex.get(e.sp);
+        const nome = e.nome && e.nome !== e.sp ? e.nome : ((sp && sp.name) || prettify(e.nome || e.sp || '?'));
+        const img = spriteDe(e);
+
+        const batalha = e.bat
+            ? BAT_STATS.map((rotulo, i) =>
+                `<div class="pp-rt-stat"><span>${rotulo}</span><b>${fmt(e.bat[i])}</b></div>`).join('')
+            : '<p class="pp-rt-tip-vazio">Sem dados desta captura.</p>';
+
+        const genetica = (e.nat || e.gen
+            ? `<div class="pp-rt-stat"><span>Natureza</span><b>${escapeHtml(e.nat || '—')}</b></div>`
+              + `<div class="pp-rt-stat"><span>Gênero</span><b>${GENERO_NOME[e.gen] || '—'}</b></div>`
+            : '')
+            + (e.det
+                ? IV_STATS.map(([, rotulo], i) =>
+                    `<div class="pp-rt-stat"><span>${rotulo}</span><b>${e.det[i]}</b></div>`).join('')
+                : '<p class="pp-rt-tip-vazio">Capturas anteriores a esta versão não guardaram os IVs.</p>');
+
+        return `
+            <div class="pp-rt-tip-top">
+                ${img ? `<img class="pp-rt-tip-sprite" src="${escapeHtml(img)}" alt="" />` : ''}
+                <div class="pp-rt-tip-id">
+                    <h3 style="color:${r.color}">${escapeHtml(nome)}${e.shiny ? ' ✦' : ''}</h3>
+                    <div class="pp-rt-tip-tags">
+                        ${e.lvl ? `<span class="pp-rt-tip-lvl">Nível ${fmt(e.lvl)}</span>` : ''}
+                        <span class="pp-rt-badge" style="color:${r.color};font-size:10.5px;padding:2px 9px;
+                              box-shadow: 0 0 8px ${r.color}4d, inset 0 0 8px ${r.color}1a;
+                              text-shadow: 0 0 6px ${r.color}80;">${r.label}</span>
+                    </div>
+                </div>
+                <div class="pp-rt-tip-poder">
+                    <b>${fmt(e.poder || 0)}</b><span>Poder total</span>
+                    ${e.mult ? `<span class="pp-rt-tip-mult">×${e.mult.toFixed(2)}</span>` : ''}
+                </div>
+            </div>
+            <div class="pp-rt-tip-cols">
+                <div class="pp-rt-tip-col">
+                    <p class="pp-rt-tip-head">Atributos de batalha</p>
+                    ${batalha}
+                </div>
+                <div class="pp-rt-tip-col">
+                    <p class="pp-rt-tip-head">Genética</p>
+                    ${genetica}
+                </div>
+            </div>
+            <div class="pp-rt-tip-total"><span>IV total</span>
+                <b>${fmt(e.iv)}/${IV_MAX}</b></div>`;
+    }
+
+    // O anúncio traz a criatura completa; aqui ela vira o mesmo formato que
+    // o registro de capturas usa, para reaproveitar o cartão.
+    function criaturaParaCartao(c) {
+        const ivs = c.ivs && typeof c.ivs === 'object' ? c.ivs : {};
+        const det = IV_STATS.map(([k]) => Math.min(Number(ivs[k]) || 0, IV_STAT_MAX));
+        return {
+            sp: String(c.species_id || ''),
+            nome: String(c.species_name || c.species_id || '?'),
+            q: normalize(c.quality) || 'weak',
+            lvl: Number(c.level) || 0,
+            iv: det.reduce((a, v) => a + v, 0),
+            det,
+            mult: Number(c.quality_multiplier) || 0,
+            bat: [c.max_hp, c.atk, c.def, c.spa, c.spd, c.spe].map(v => Number(v) || 0),
+            poder: Number(c.power) || 0,
+            nat: String(c.nature || ''),
+            gen: c.gender === 'male' || c.gender === 'female' ? c.gender : '',
+            shiny: !!c.is_shiny,
+            spriteN: c.normal_sprite_url,
+            spriteS: c.shiny_sprite_url,
+        };
+    }
+
+    // Largura aproximada do balão nativo do jogo, medida na tela do mercado.
+    // Serve só para desviar dele quando não há espaço do outro lado.
+    const BALAO_JOGO = 300;
+
+    let marketTip = null;
+
+    function ligarMercado() {
+        marketTip = document.createElement('div');
+        marketTip.id = 'pp-rt-market-tip';
+        document.body.appendChild(marketTip);
+
+        const esconder = () => marketTip.classList.remove('pp-on');
+
+        // Delegação no documento: os cards do mercado são criados e destruídos
+        // pelo próprio jogo, então não dá para ouvir cada um.
+        document.addEventListener('mouseover', ev => {
+            const card = ev.target.closest
+                && ev.target.closest('article.market-listing[data-listing-id]');
+            if (!card) { esconder(); return; }
+
+            const c = listings.get(card.dataset.listingId);
+            if (!c) { esconder(); return; }
+
+            marketTip.innerHTML = tipHtml(criaturaParaCartao(c));
+            marketTip.classList.add('pp-on');
+
+            // Colado no card, do lado direito. O balão nativo do jogo só abre
+            // quando o mouse está sobre o sprite (.market-listing__icon) e sai
+            // pela direita — nesse caso este vai para a esquerda, e os dois
+            // ficam lado a lado em vez de sobrepostos.
+            const sobreSprite = !!(ev.target.closest
+                && ev.target.closest('.market-listing__icon'));
+
+            const r = card.getBoundingClientRect();
+            const w = marketTip.offsetWidth;
+            const h = marketTip.offsetHeight;
+            const folga = 12;
+
+            const naDireita = r.right + folga;
+            const naEsquerda = r.left - folga - w;
+            const cabeDireita = naDireita + w <= window.innerWidth - 6;
+            const cabeEsquerda = naEsquerda >= 6;
+
+            let esquerda;
+            if (sobreSprite) {
+                // Primeira escolha: o lado oposto ao balão do jogo.
+                // Sem espaço lá (card na coluna da esquerda), passa depois
+                // dele, deixando card, balão e cartão em fila.
+                const depoisDoBalao = r.right + folga + BALAO_JOGO;
+                esquerda = cabeEsquerda ? naEsquerda
+                    : depoisDoBalao + w <= window.innerWidth - 6 ? depoisDoBalao
+                    : Math.max(6, window.innerWidth - w - 6);
+            } else {
+                esquerda = cabeDireita ? naDireita : Math.max(6, naEsquerda);
+            }
+
+            const topo = Math.max(6, Math.min(r.top, window.innerHeight - h - 6));
+            marketTip.style.left = Math.max(6, esquerda) + 'px';
+            marketTip.style.top = topo + 'px';
+        }, true);
+
+        document.addEventListener('mouseout', ev => {
+            if (ev.target.closest && ev.target.closest('article.market-listing')) esconder();
+        }, true);
+    }
+
+    function mostrarTip(linha) {
+        const e = paginaAtual[Number(linha.dataset.i)];
+        if (!e) return;
+
+        els.tip.innerHTML = tipHtml(e);
+        els.tip.classList.add('pp-on');
+
+        // Ancorada na linha, mas presa dentro da tabela: o painel usa
+        // overflow hidden e a mini tela sumiria se vazasse.
+        const alturaTabela = els.rows.offsetHeight + els.rows.offsetTop;
+        const alvo = linha.offsetTop + linha.offsetHeight / 2 - els.tip.offsetHeight / 2;
+        const topo = Math.max(els.rows.offsetTop,
+            Math.min(alvo, alturaTabela - els.tip.offsetHeight));
+        els.tip.style.top = topo + 'px';
+    }
+
     function render() {
         if (!els) return;
 
@@ -938,11 +1500,17 @@
             : '';
 
         // O título acompanha a aba ativa.
-        els.title.textContent = view === 'ball'
-            ? 'Capturas por pokébola'
+        els.title.textContent = view === 'ball' ? 'Capturas por pokébola'
+            : view === 'log' ? 'Registro de capturas'
             : 'Capturas por raridade';
 
-        if (view === 'ball') {
+        // Filtros e paginação só existem na aba de capturas.
+        els.filters.classList.toggle('pp-on', view === 'log');
+        els.pager.classList.toggle('pp-on', view === 'log');
+
+        if (view === 'log') {
+            renderLog();
+        } else if (view === 'ball') {
             els.head1.textContent = 'Pokébola';
 
             const vazia = { attempts: 0, captures: 0 };
@@ -951,14 +1519,10 @@
             const tAtt = chaves.reduce((a, k) => a + state.balls[k].attempts, 0);
             const tCap = chaves.reduce((a, k) => a + state.balls[k].captures, 0);
 
-            // O catálogo vem sempre inteiro e na ordem de eficiência.
-            const icone = b => `<span class="pp-rt-ball" style="--pp-band:${b.band};`
-                + `background:linear-gradient(to bottom,${b.top} 0 44%,${b.band} 44% 56%,${b.bottom} 56% 100%)"></span>`;
-
             const linhas = BALLS.map(b => {
                 const d = state.balls[b.key] || vazia;
                 return row(b.label, b.color, d.attempts, d.captures,
-                    { dashWhenEmpty: true, icon: icone(b) });
+                    { dashWhenEmpty: true, icon: iconeBola(b) });
             });
 
             // Qualquer bola fora do catálogo (ex.: recompensa de evento) entra
@@ -973,7 +1537,11 @@
                 + linhas.join('')
                 + preencher(maxLinhas - linhas.length);
         } else {
-            els.head1.textContent = 'Raridade';
+            els.hrow.style.display = '';
+            els.hrow.classList.remove('pp-rt-hrow--log');
+            els.hrow.innerHTML = '<div id="pp-rt-h1">Raridade</div><div>Tentativas</div>'
+                + '<div>Capturas</div><div>Taxa de captura</div>';
+            els.head1 = els.hrow.querySelector('#pp-rt-h1');
 
             const sum = key => RARITY_KEYS.reduce((acc, k) => acc + state[key][k], 0);
             const allAtt = sum('attempts');
