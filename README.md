@@ -14,7 +14,9 @@ O jogo informa a qualidade de cada Pokémon e a raridade de cada captura, mas n�
 
 **Detalhes no hover** — passando o mouse sobre qualquer captura, aparece um cartão com os atributos de batalha e a genética completa: natureza, gênero e quanto de IV foi para cada atributo.
 
-**Hunt atual** — o sprite e o nome da espécie do mapa em que você está caçando. Clique no sprite para alternar entre normal e shiny.
+**Estatísticas por hunt** — além do total geral, cada mapa que você caçou tem seus próprios números. Dá para comparar como está indo no Tyranitar contra como foi no Machamp, e zerar uma hunt sem perder as outras.
+
+**Hunt atual** — o sprite e o nome da espécie do mapa em que você está caçando. Clique no sprite para alternar entre normal e shiny. Ao voltar à cidade, o cartão avisa que não há caçada em andamento.
 
 Os contadores são separados por conta, então dá para jogar com duas contas em abas diferentes sem que uma sobrescreva a outra.
 
@@ -33,6 +35,18 @@ Passe o mouse sobre qualquer anúncio de Pokémon e o cartão aparece ao lado, c
 O cartão fica colado no anúncio. Quando o mouse passa sobre o sprite, o jogo abre o próprio balão de detalhes — nesse caso o cartão se desloca para o lado oposto, ou passa depois do balão quando não há espaço, para que os dois nunca se sobreponham.
 
 Nada disso é informação oculta: o jogo já envia esses dados ao seu navegador em cada página do mercado, apenas não os desenha na tela. A correspondência entre o card e os dados é feita pelo `data-listing-id` do anúncio, então não há risco de exibir os atributos de um Pokémon no lugar de outro.
+
+## Estatísticas por hunt
+
+O seletor **Mostrando estatísticas** fica no cartão da hunt atual e troca o que as três abas exibem. Escolhendo "Todas as hunts", os números são o acumulado da conta; escolhendo um mapa, tudo passa a ser daquele mapa — raridades, pokébolas e o registro de capturas.
+
+Cada tentativa é creditada ao total e à hunt corrente na mesma passagem, então **a soma das hunts é sempre igual ao total**. Isso é possível porque o evento que identifica a hunt sempre chega antes das bolas daquele combate.
+
+Sair de uma hunt e voltar depois **retoma de onde parou** — os contadores de cada mapa são preservados até você decidir zerá-los.
+
+O botão de zerar acompanha a seleção: com uma hunt escolhida ele vira "Zerar Machamp" e afeta só ela, enquanto em "Todas as hunts" ele vira "Zerar tudo". Ao zerar uma hunt, os números dela também saem do total — do contrário o total guardaria valores que não aparecem em nenhum perfil.
+
+São guardadas **40 hunts**. Passando disso, sai a que ficou mais tempo sem uso, e não a mais antiga: assim o mapa que você caça todo dia nunca é descartado por ter sido o primeiro.
 
 ## Instalação
 
@@ -80,11 +94,15 @@ O jogo transmite os eventos de combate por WebSocket, cada um numerado sequencia
 
 Como cada Pokémon é um evento discreto com a própria qualidade, não há dedução nem estimativa — a atribuição é exata. A numeração sequencial também permite detectar mensagens perdidas na conexão, que são avisadas no rodapé do painel em vez de passarem despercebidas.
 
-Duas chamadas HTTP são lidas, ambas via `clone()` para não consumir a resposta do jogo: `/species`, para nomes e sprites, e `/listings`, para os dados dos anúncios do mercado.
+Três chamadas HTTP são lidas, todas via `clone()` para não consumir a resposta do jogo: `/species`, para nomes e sprites; `/listings`, para os dados dos anúncios do mercado; e `/stop`, que o jogo dispara ao voltar à cidade e serve para o cartão parar de apontar um mapa. Nenhuma delas é modificada, e o script não faz requisições próprias.
 
 ### Limites conhecidos
 
 O registro guarda as **últimas 100 capturas**. O armazenamento do Tampermonkey não é infinito e uma sessão de farm gera milhares de eventos; um log sem limite acabaria estourando.
+
+São guardadas as **40 hunts** menos ociosas, e capturas feitas fora de uma caçada entram no total sem serem creditadas a nenhum mapa.
+
+Não existe evento de "entrei na cidade" além do `/stop`. Se você recarregar a página já estando lá, o cartão leva até um minuto de inatividade para reconhecer que não há caçada.
 
 O hover do mercado é a única parte que depende da estrutura interna do jogo — ele encontra os anúncios pelo atributo `data-listing-id` dos cards. Se o desenvolvedor renomear essas classes, esse recurso para de funcionar sem afetar o resto.
 
