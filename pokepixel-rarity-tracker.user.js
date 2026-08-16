@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pokepixel — Raridades
 // @namespace    https://pokepixel.nietore.com/
-// @version      2.32.0
+// @version      3.6.0
 // @description  Conta tentativas e capturas por qualidade (Fraca a Mítica) lendo os eventos de captura do jogo.
 // @author       Lfmagliano
 // @homepageURL  https://github.com/Lfmagliano/pokepixel-raridades
@@ -87,8 +87,57 @@
     const IV_MAX = 186;         // 31 por atributo, seis atributos
     const IV_STAT_MAX = 31;
     // Ordem e rótulos iguais aos do painel de genética do jogo
-    const BAT_STATS = ['HP máximo', 'Ataque', 'Defesa',
-                       'Atq. Especial', 'Def. Especial', 'Velocidade'];
+    // Rótulos curtos na ordem [max_hp, atk, def, spa, spd, spe]
+    const BAT_STATS = ['HP', 'ATK', 'DEF', 'ATK SP', 'DEF SP', 'VEL'];
+    const BAT_NOMES = ['HP', 'Ataque', 'Defesa', 'Atq. Esp.', 'Def. Esp.', 'Velocidade'];
+
+    // Disposição do card do jogo: duas colunas, HP/ATK/ATK SP à esquerda.
+    const BAT_ORDEM = [[0, 2], [1, 4], [3, 5]];
+
+    // Natureza: nome em pt-BR e qual atributo ela favorece e prejudica.
+    // Índices seguem BAT_STATS; null = natureza neutra.
+    // Faixas de multiplicador por raridade, lidas de /formulas. São duas
+    // tabelas distintas: shiny tem só três faixas, e a mais baixa delas fica
+    // acima da lendária normal — por isso não dá para derivar uma da outra.
+    const faixas = { normal: Object.create(null), shiny: Object.create(null) };
+
+    function indexFaixas(f) {
+        const ler = (lista, destino) => {
+            if (!Array.isArray(lista)) return;
+            for (const b of lista) {
+                const k = b && normalize(b.label);
+                if (k) destino[k] = { min: Number(b.min), max: Number(b.max) };
+            }
+        };
+        ler(f && f.normal_quality_bands, faixas.normal);
+        ler(f && f.shiny_quality_bands, faixas.shiny);
+    }
+
+    const faixaDe = (rarity, shiny) =>
+        (shiny ? faixas.shiny[rarity] : faixas.normal[rarity]) || null;
+
+    // Bônus de gênero. O caso da fêmea está confirmado no card do jogo;
+    // o do macho segue o comportamento relatado pelos jogadores.
+    const BONUS_GENERO = {
+        female: '<span class="pp-rt-up">▲</span> HP +10%',
+        male: '<span class="pp-rt-up">▲</span> Ataque +10% · <span class="pp-rt-up">▲</span> Atq. Esp. +10%',
+    };
+
+    const NATUREZAS = {
+        hardy: ['Destemida', null, null],       docile: ['Dócil', null, null],
+        serious: ['Séria', null, null],         bashful: ['Envergonhada', null, null],
+        quirky: ['Peculiar', null, null],
+        lonely: ['Solitária', 1, 2],            brave: ['Valente', 1, 5],
+        adamant: ['Rígida', 1, 3],              naughty: ['Teimosa', 1, 4],
+        bold: ['Ousada', 2, 1],                 relaxed: ['Relaxada', 2, 5],
+        impish: ['Travessa', 2, 3],             lax: ['Descuidada', 2, 4],
+        timid: ['Tímida', 5, 1],                hasty: ['Apressada', 5, 2],
+        jolly: ['Alegre', 5, 3],                naive: ['Ingênua', 5, 4],
+        modest: ['Modesta', 3, 1],              mild: ['Suave', 3, 2],
+        quiet: ['Quieta', 3, 5],                rash: ['Impulsiva', 3, 4],
+        calm: ['Calma', 4, 1],                  gentle: ['Gentil', 4, 2],
+        sassy: ['Atrevida', 4, 5],              careful: ['Cuidadosa', 4, 3],
+    };
     const IV_STATS = [
         ['hp',  'IV HP'],
         ['atk', 'IV Ataque'],
@@ -538,24 +587,6 @@
         useAccount(id || ('sessao:' + (hash >>> 0).toString(16).padStart(8, '0')), name || null);
     }
 
-    // Anúncios do mercado: id do anúncio -> criatura. O card no DOM traz
-    // data-listing-id, que casa com o id daqui — por isso a correspondência
-    // é exata, sem depender de nome nem dos números na tela.
-    const listings = new Map();
-    const LISTINGS_CAP = 4000;
-
-    function indexListings(list) {
-        for (const l of list) {
-            if (!l || !l.id || l.kind !== 'pokemon' || !l.creature) continue;
-            listings.set(l.id, l.creature);
-        }
-        // O mercado é paginado; o índice acumula o que já passou, mas não
-        // cresce sem limite.
-        while (listings.size > LISTINGS_CAP) {
-            listings.delete(listings.keys().next().value);
-        }
-    }
-
     // O catálogo de espécies vem por HTTP, não pelo WebSocket: é a única
     // chamada que ainda interessa interceptar.
     const origFetch = W.fetch;
@@ -569,10 +600,26 @@
                     p.then(res => res.clone().json())
                      .then(b => { const d = b && b.data; if (Array.isArray(d)) { indexSpecies(d); render(); } })
                      .catch(() => {});
+                } else if (/\/formulas(\?|$)/.test(url)) {
+                    p.then(res => res.clone().json())
+                     .then(b => {
+                         const q = b && (b.quality || b.data && b.data.quality) || b;
+                         indexFaixas(q);
+                         render();
+                     })
+                     .catch(() => {});
                 } else if (/\/stop(\?|$)/.test(url)) {
                     // "Voltar à cidade" encerra a caçada. É o sinal exato de
                     // que não há mais hunt ativa, sem depender de espera.
                     p.then(() => { encerrarHunt(); }).catch(() => {});
+                } else if (/\/formulas(\?|$)/.test(url)) {
+                    p.then(res => res.clone().json())
+                     .then(b => {
+                         const q = b && (b.quality || b.data && b.data.quality) || b;
+                         indexFaixas(q);
+                         render();
+                     })
+                     .catch(() => {});
                 } else if (/\/stop(\?|$)/.test(url)) {
                     // Encerrou a caçada: o cartão deixa de apontar um mapa.
                     p.then(() => {
@@ -580,10 +627,6 @@
                         huntAtual = null;
                         renderHunt();
                     }).catch(() => {});
-                } else if (/\/listings(\?|$)/.test(url)) {
-                    p.then(res => res.clone().json())
-                     .then(b => { const d = b && b.data; if (Array.isArray(d)) indexListings(d); })
-                     .catch(() => {});
                 }
             } catch (e) { /* nunca atrapalha o jogo */ }
             return p;
@@ -839,73 +882,96 @@
 
     /* Mini painel de genética, no estilo da tela do jogo. pointer-events:none
        para que ele nunca roube o hover da própria linha. */
-    #pp-rt-market-tip {
-        position: fixed; z-index: 2147483647; display: none;
-        width: 336px; padding: 0; pointer-events: none; overflow: hidden;
-        background: #0e0e10; border: 1px solid #3a3a44; border-radius: 12px;
-        box-shadow: 0 16px 38px rgba(0,0,0,.72);
-        font-family: ui-sans-serif, system-ui, sans-serif; color: #e6e6ea;
-    }
-    #pp-rt-market-tip.pp-on { display: block; }
-
     #pp-rt-tip {
-        position: absolute; display: none; z-index: 5; right: 26px;
-        width: 336px; padding: 0; pointer-events: none; overflow: hidden;
+        /* Fixo e fora do painel: dentro dele o overflow hidden, que garante
+           a ausência de rolagem, cortaria o cartão pelo pé. */
+        position: fixed; display: none; z-index: 2147483647;
+        width: 344px; padding: 0; pointer-events: none; overflow: hidden;
         background: #0e0e10; border: 1px solid #3a3a44; border-radius: 12px;
         box-shadow: 0 16px 38px rgba(0,0,0,.7);
+        /* Fora do painel, a herança de fonte se perdeu e o cartão passou a
+           usar a tipografia da página do jogo. Declarada aqui, volta a ser a
+           mesma do resto do painel. */
+        font-family: ui-sans-serif, system-ui, sans-serif;
+        font-size: 13px; line-height: normal; color: #e6e6ea;
+        font-weight: 400; letter-spacing: normal; text-transform: none;
     }
     #pp-rt-tip.pp-on { display: block; }
 
-    /* Cabeçalho: sprite, nome, raridade, multiplicador e poder total */
     .pp-rt-tip-top {
         display: flex; align-items: center; gap: 12px;
         padding: 11px 13px; background: #16161a; border-bottom: 1px solid #26262e;
     }
     .pp-rt-tip-sprite {
-        width: 52px; height: 52px; flex: none; object-fit: contain;
+        width: 50px; height: 50px; flex: none; object-fit: contain;
         image-rendering: pixelated; background: #101014;
-        border: 1px solid #26262e; border-radius: 50%; padding: 3px;
+        border: 1px solid #3a3a44; border-radius: 50%; padding: 3px;
     }
-    .pp-rt-tip-id { flex: 1; min-width: 0; }
-    .pp-rt-tip-id h3 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
+    .pp-rt-tip-id { min-width: 0; }
+    .pp-rt-tip-id h3 { margin: 0 0 6px; font-size: 16px; font-weight: 600; color: #e6e6ea; }
     .pp-rt-tip-tags { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
     .pp-rt-tip-lvl {
-        background: #1c2b3a; border: 1px solid #2f4a63; color: #7fb6e0;
-        border-radius: 6px; padding: 2px 7px; font-size: 10.5px;
+        background: #14252f; border: 1px solid #2b4a5e; color: #7fc4e0;
+        border-radius: 6px; padding: 2px 8px; font-size: 10.5px;
     }
-    .pp-rt-tip-poder { text-align: right; flex: none; }
-    .pp-rt-tip-poder b { display: block; font-size: 19px; color: #e6e6ea; line-height: 1.1; }
-    .pp-rt-tip-poder span {
-        display: block; color: #7a7a86; font-size: 8.5px;
-        letter-spacing: .1em; text-transform: uppercase;
-    }
-    .pp-rt-tip-mult {
-        display: block; margin-top: 5px; text-align: center;
-        background: #221d12; border: 1px solid #4a3d22; border-radius: 6px;
-        color: #d9b665; padding: 3px 7px; font-size: 10.5px;
-        font-variant-numeric: tabular-nums;
+    .pp-rt-tip-shiny {
+        background: #10242b; border: 1px solid #2c5a66; color: #4fc6ea;
+        border-radius: 6px; padding: 2px 8px; font-size: 10.5px;
     }
 
-    /* Duas colunas: atributos de batalha e genética, como no jogo */
-    .pp-rt-tip-cols { display: grid; grid-template-columns: 1fr 1fr; }
-    .pp-rt-tip-col { padding: 10px 13px; }
-    .pp-rt-tip-col + .pp-rt-tip-col { border-left: 1px solid #26262e; }
-    .pp-rt-tip-head {
-        margin: 0 0 7px; color: #d9b665; font-size: 10px;
-        letter-spacing: .1em; text-transform: uppercase;
+    /* Poder total e IV total lado a lado, como no card do jogo */
+    .pp-rt-tip-caixas { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 10px 13px 0; }
+    .pp-rt-tip-caixas.pp-rt-uma { grid-template-columns: 1fr; }
+    .pp-rt-caixa--rar b i { font-style: normal; color: #8b8b95; font-size: 13px; }
+    .pp-rt-caixa--rar em {
+        display: block; margin-top: 5px; font-style: normal;
+        color: #7a7a86; font-size: 10px;
     }
+    .pp-rt-caixa {
+        background: #16161a; border: 1px solid #26262e; border-radius: 9px; padding: 8px 10px;
+    }
+    .pp-rt-caixa p {
+        margin: 0 0 3px; color: #7a7a86; font-size: 9px;
+        letter-spacing: .12em; text-transform: uppercase;
+    }
+    .pp-rt-caixa b { font-size: 16px; color: #e6e6ea; font-variant-numeric: tabular-nums; }
+    .pp-rt-caixa b i { font-style: normal; font-size: 11px; color: #55555f; }
+    .pp-rt-iv-barra {
+        display: block; height: 4px; margin-top: 5px; border-radius: 2px;
+        background: #26262e; overflow: hidden;
+    }
+    .pp-rt-iv-barra span { display: block; height: 100%; border-radius: 2px; }
+
+    .pp-rt-tip-sec { padding: 10px 13px 0; }
+    .pp-rt-tip-gen { padding-bottom: 11px; }
+    .pp-rt-tip-head {
+        margin: 0 0 6px; color: #d9b665; font-size: 9.5px;
+        letter-spacing: .12em; text-transform: uppercase;
+    }
+
+    /* Cada atributo mostra o valor efetivo e o IV que o gerou */
+    .pp-rt-bat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 3px 10px; }
+    .pp-rt-bat {
+        display: flex; align-items: baseline; gap: 5px;
+        background: #16161a; border: 1px solid #26262e; border-radius: 7px;
+        padding: 5px 8px; font-size: 11px;
+    }
+    .pp-rt-bat > span { color: #8b8b95; flex: 1; }
+    .pp-rt-bat > b { color: #e6e6ea; font-variant-numeric: tabular-nums; }
+    .pp-rt-bat > i {
+        font-style: normal; color: #55555f; font-size: 10px;
+        font-variant-numeric: tabular-nums;
+    }
+    .pp-rt-neutro { color: #8b8b95 !important; font-weight: 500 !important; }
+    .pp-rt-up { color: #54d97c; font-size: 9px; margin-left: 2px; }
+    .pp-rt-down { color: #f0736b; font-size: 9px; margin-left: 2px; }
+
     .pp-rt-stat {
         display: flex; justify-content: space-between; align-items: baseline;
-        gap: 8px; margin-bottom: 5px; font-size: 11px;
+        gap: 8px; margin-bottom: 4px; font-size: 11px;
     }
     .pp-rt-stat span { color: #8b8b95; }
-    .pp-rt-stat b { color: #e6e6ea; font-weight: 600; font-variant-numeric: tabular-nums; }
-    .pp-rt-tip-total {
-        display: flex; justify-content: space-between; align-items: baseline;
-        padding: 8px 13px; border-top: 1px solid #26262e;
-        font-size: 11.5px; color: #8b8b95;
-    }
-    .pp-rt-tip-total b { color: #e6e6ea; font-variant-numeric: tabular-nums; }
+    .pp-rt-stat b { color: #e6e6ea; font-weight: 600; text-align: right; }
     .pp-rt-tip-vazio { color: #55555f; font-size: 11px; margin: 0; }
     .pp-rt-hrow, .pp-rt-row {
         display: grid; grid-template-columns: 1.4fr .8fr .8fr 1.7fr;
@@ -1069,7 +1135,6 @@
                         <div id="pp-rt-h1">Raridade</div><div>Tentativas</div><div>Capturas</div><div>Taxa de captura</div>
                     </div>
                     <div id="pp-rt-rows"></div>
-                    <div id="pp-rt-tip"></div>
                 </div>
                 <div id="pp-rt-pager">
                     <span id="pp-rt-pager-info"></span>
@@ -1089,6 +1154,10 @@
 
         document.body.appendChild(fab);
         document.body.appendChild(overlay);
+
+        const tip = document.createElement('div');
+        tip.id = 'pp-rt-tip';
+        document.body.appendChild(tip);
 
         els = {
             overlay, fab,
@@ -1113,7 +1182,7 @@
             account: overlay.querySelector('#pp-rt-account'),
             diag: overlay.querySelector('#pp-rt-diag'),
             hrow: overlay.querySelector('.pp-rt-hrow'),
-            tip: overlay.querySelector('#pp-rt-tip'),
+            tip,
             filters: overlay.querySelector('#pp-rt-filters'),
             fQ: overlay.querySelector('#pp-rt-f-q'),
             fIvMin: overlay.querySelector('#pp-rt-f-ivmin'),
@@ -1238,8 +1307,6 @@
             if (fabPos) placeFab(fabPos.left, fabPos.top);
             fitPanel();
         });
-
-        ligarMercado();
 
         // Sem evento novo, nada dispararia o redesenho; esta checagem leve faz
         // o cartão passar para "sem caçada" quando os combates cessam.
@@ -1542,138 +1609,101 @@
         const nome = e.nome && e.nome !== e.sp ? e.nome : ((sp && sp.name) || prettify(e.nome || e.sp || '?'));
         const img = spriteDe(e);
 
-        const batalha = e.bat
-            ? BAT_STATS.map((rotulo, i) =>
-                `<div class="pp-rt-stat"><span>${rotulo}</span><b>${fmt(e.bat[i])}</b></div>`).join('')
+        const nat = NATUREZAS[String(e.nat || '').toLowerCase()];
+        const sobe = nat ? nat[1] : null;
+        const desce = nat ? nat[2] : null;
+
+        // Cada atributo traz o valor efetivo e o IV que o gerou, como no card
+        // do jogo. A seta marca o que a natureza favorece ou prejudica.
+        const stat = i => {
+            if (!e.bat) return '';
+            const seta = i === sobe ? '<b class="pp-rt-up">▲</b>'
+                : i === desce ? '<b class="pp-rt-down">▼</b>' : '';
+            const iv = e.det ? `${e.det[i]}/${IV_STAT_MAX}` : '—';
+            return `<div class="pp-rt-bat">
+                <span>${BAT_STATS[i]}${seta}</span>
+                <b>${fmt(e.bat[i])}</b><i>${iv}</i>
+            </div>`;
+        };
+
+        const atributos = e.bat
+            ? BAT_ORDEM.map(([a, b]) => stat(a) + stat(b)).join('')
             : '<p class="pp-rt-tip-vazio">Sem dados desta captura.</p>';
 
-        const genetica = (e.nat || e.gen
-            ? `<div class="pp-rt-stat"><span>Natureza</span><b>${escapeHtml(e.nat || '—')}</b></div>`
-              + `<div class="pp-rt-stat"><span>Gênero</span><b>${GENERO_NOME[e.gen] || '—'}</b></div>`
-            : '')
-            + (e.det
-                ? IV_STATS.map(([, rotulo], i) =>
-                    `<div class="pp-rt-stat"><span>${rotulo}</span><b>${e.det[i]}</b></div>`).join('')
-                : '<p class="pp-rt-tip-vazio">Capturas anteriores a esta versão não guardaram os IVs.</p>');
+        // Natureza neutra não é omitida: o jogo escreve "Sem efeito".
+        const ganho = !nat ? ''
+            : sobe === null
+                ? `<div class="pp-rt-stat"><span>Ganho/perda</span>
+                     <b class="pp-rt-neutro">Sem efeito</b></div>`
+                : `<div class="pp-rt-stat"><span>Ganho/perda</span>
+                     <b><span class="pp-rt-up">▲</span> ${BAT_NOMES[sobe]}
+                        <span class="pp-rt-down">▼</span> ${BAT_NOMES[desce]}</b></div>`;
+
+        const pctIv = Math.min((e.iv / IV_MAX) * 100, 100);
+
+        // Onde o multiplicador caiu dentro da faixa da própria raridade:
+        // mostra se o Pokémon é bom ou fraco para o tier dele.
+        const faixa = e.mult ? faixaDe(e.q, e.shiny) : null;
+        const pctFaixa = faixa && faixa.max > faixa.min
+            ? Math.max(0, Math.min(((e.mult - faixa.min) / (faixa.max - faixa.min)) * 100, 100))
+            : 0;
 
         return `
             <div class="pp-rt-tip-top">
                 ${img ? `<img class="pp-rt-tip-sprite" src="${escapeHtml(img)}" alt="" />` : ''}
                 <div class="pp-rt-tip-id">
-                    <h3 style="color:${r.color}">${escapeHtml(nome)}${e.shiny ? ' ✦' : ''}</h3>
+                    <h3>${escapeHtml(nome)}</h3>
                     <div class="pp-rt-tip-tags">
                         ${e.lvl ? `<span class="pp-rt-tip-lvl">Nível ${fmt(e.lvl)}</span>` : ''}
                         <span class="pp-rt-badge" style="color:${r.color};font-size:10.5px;padding:2px 9px;
                               box-shadow: 0 0 8px ${r.color}4d, inset 0 0 8px ${r.color}1a;
-                              text-shadow: 0 0 6px ${r.color}80;">${r.label}</span>
+                              text-shadow: 0 0 6px ${r.color}80;">${r.label}${
+                                  e.mult ? ` ×${e.mult.toFixed(2)}` : ''}</span>
+                        ${e.shiny ? '<span class="pp-rt-tip-shiny">Shiny</span>' : ''}
                     </div>
                 </div>
-                <div class="pp-rt-tip-poder">
-                    <b>${fmt(e.poder || 0)}</b><span>Poder total</span>
-                    ${e.mult ? `<span class="pp-rt-tip-mult">×${e.mult.toFixed(2)}</span>` : ''}
+            </div>
+
+            <div class="pp-rt-tip-caixas">
+                <div class="pp-rt-caixa">
+                    <p>Poder total</p><b>${fmt(e.poder || 0)}</b>
+                </div>
+                <div class="pp-rt-caixa">
+                    <p>IV total</p><b>${fmt(e.iv)}<i>/${IV_MAX}</i></b>
+                    <span class="pp-rt-iv-barra"><span style="width:${pctIv}%;background:${r.color}"></span></span>
                 </div>
             </div>
-            <div class="pp-rt-tip-cols">
-                <div class="pp-rt-tip-col">
-                    <p class="pp-rt-tip-head">Atributos de batalha</p>
-                    ${batalha}
+
+            ${faixa ? `
+            <div class="pp-rt-tip-caixas pp-rt-uma">
+                <div class="pp-rt-caixa pp-rt-caixa--rar" style="border-color:${r.color}66">
+                    <p>Raridade</p>
+                    <b>×${e.mult.toFixed(2)} <i>/ ×${faixa.max.toFixed(2)}</i></b>
+                    <span class="pp-rt-iv-barra"><span
+                        style="width:${pctFaixa}%;background:${r.color}"></span></span>
+                    <em>${e.shiny ? 'Shiny' : 'Normal'} · ${r.label} · faixa
+                        ${faixa.min.toFixed(2).replace('.', ',')} –
+                        ${faixa.max.toFixed(2).replace('.', ',')}</em>
                 </div>
-                <div class="pp-rt-tip-col">
-                    <p class="pp-rt-tip-head">Genética</p>
-                    ${genetica}
-                </div>
+            </div>` : ''}
+
+            <div class="pp-rt-tip-sec">
+                <p class="pp-rt-tip-head">Atributos de batalha</p>
+                <div class="pp-rt-bat-grid">${atributos}</div>
             </div>
-            <div class="pp-rt-tip-total"><span>IV total</span>
-                <b>${fmt(e.iv)}/${IV_MAX}</b></div>`;
-    }
 
-    // O anúncio traz a criatura completa; aqui ela vira o mesmo formato que
-    // o registro de capturas usa, para reaproveitar o cartão.
-    function criaturaParaCartao(c) {
-        const ivs = c.ivs && typeof c.ivs === 'object' ? c.ivs : {};
-        const det = IV_STATS.map(([k]) => Math.min(Number(ivs[k]) || 0, IV_STAT_MAX));
-        return {
-            sp: String(c.species_id || ''),
-            nome: String(c.species_name || c.species_id || '?'),
-            q: normalize(c.quality) || 'weak',
-            lvl: Number(c.level) || 0,
-            iv: det.reduce((a, v) => a + v, 0),
-            det,
-            mult: Number(c.quality_multiplier) || 0,
-            bat: [c.max_hp, c.atk, c.def, c.spa, c.spd, c.spe].map(v => Number(v) || 0),
-            poder: Number(c.power) || 0,
-            nat: String(c.nature || ''),
-            gen: c.gender === 'male' || c.gender === 'female' ? c.gender : '',
-            shiny: !!c.is_shiny,
-            spriteN: c.normal_sprite_url,
-            spriteS: c.shiny_sprite_url,
-        };
-    }
-
-    // Largura aproximada do balão nativo do jogo, medida na tela do mercado.
-    // Serve só para desviar dele quando não há espaço do outro lado.
-    const BALAO_JOGO = 300;
-
-    let marketTip = null;
-
-    function ligarMercado() {
-        marketTip = document.createElement('div');
-        marketTip.id = 'pp-rt-market-tip';
-        document.body.appendChild(marketTip);
-
-        const esconder = () => marketTip.classList.remove('pp-on');
-
-        // Delegação no documento: os cards do mercado são criados e destruídos
-        // pelo próprio jogo, então não dá para ouvir cada um.
-        document.addEventListener('mouseover', ev => {
-            const card = ev.target.closest
-                && ev.target.closest('article.market-listing[data-listing-id]');
-            if (!card) { esconder(); return; }
-
-            const c = listings.get(card.dataset.listingId);
-            if (!c) { esconder(); return; }
-
-            marketTip.innerHTML = tipHtml(criaturaParaCartao(c));
-            marketTip.classList.add('pp-on');
-
-            // Colado no card, do lado direito. O balão nativo do jogo só abre
-            // quando o mouse está sobre o sprite (.market-listing__icon) e sai
-            // pela direita — nesse caso este vai para a esquerda, e os dois
-            // ficam lado a lado em vez de sobrepostos.
-            const sobreSprite = !!(ev.target.closest
-                && ev.target.closest('.market-listing__icon'));
-
-            const r = card.getBoundingClientRect();
-            const w = marketTip.offsetWidth;
-            const h = marketTip.offsetHeight;
-            const folga = 12;
-
-            const naDireita = r.right + folga;
-            const naEsquerda = r.left - folga - w;
-            const cabeDireita = naDireita + w <= window.innerWidth - 6;
-            const cabeEsquerda = naEsquerda >= 6;
-
-            let esquerda;
-            if (sobreSprite) {
-                // Primeira escolha: o lado oposto ao balão do jogo.
-                // Sem espaço lá (card na coluna da esquerda), passa depois
-                // dele, deixando card, balão e cartão em fila.
-                const depoisDoBalao = r.right + folga + BALAO_JOGO;
-                esquerda = cabeEsquerda ? naEsquerda
-                    : depoisDoBalao + w <= window.innerWidth - 6 ? depoisDoBalao
-                    : Math.max(6, window.innerWidth - w - 6);
-            } else {
-                esquerda = cabeDireita ? naDireita : Math.max(6, naEsquerda);
-            }
-
-            const topo = Math.max(6, Math.min(r.top, window.innerHeight - h - 6));
-            marketTip.style.left = Math.max(6, esquerda) + 'px';
-            marketTip.style.top = topo + 'px';
-        }, true);
-
-        document.addEventListener('mouseout', ev => {
-            if (ev.target.closest && ev.target.closest('article.market-listing')) esconder();
-        }, true);
+            <div class="pp-rt-tip-sec pp-rt-tip-gen">
+                <p class="pp-rt-tip-head">Genética</p>
+                <div class="pp-rt-stat"><span>Natureza</span>
+                    <b>${escapeHtml(nat ? nat[0] : (e.nat || '—'))}</b></div>
+                ${ganho}
+                <div class="pp-rt-stat"><span>Gênero</span>
+                    <b>${GENERO_NOME[e.gen] || '—'}</b></div>
+                ${BONUS_GENERO[e.gen]
+                    ? `<div class="pp-rt-stat"><span>Ganho/perda</span>
+                         <b>${BONUS_GENERO[e.gen]}</b></div>`
+                    : ''}
+            </div>`;
     }
 
     function mostrarTip(linha) {
@@ -1683,12 +1713,24 @@
         els.tip.innerHTML = tipHtml(e);
         els.tip.classList.add('pp-on');
 
-        // Ancorada na linha, mas presa dentro da tabela: o painel usa
-        // overflow hidden e a mini tela sumiria se vazasse.
-        const alturaTabela = els.rows.offsetHeight + els.rows.offsetTop;
-        const alvo = linha.offsetTop + linha.offsetHeight / 2 - els.tip.offsetHeight / 2;
-        const topo = Math.max(els.rows.offsetTop,
-            Math.min(alvo, alturaTabela - els.tip.offsetHeight));
+        const r = linha.getBoundingClientRect();
+        const painel = els.panel.getBoundingClientRect();
+        const w = els.tip.offsetWidth;
+        const h = els.tip.offsetHeight;
+        const folga = 12;
+
+        // Ao lado do painel, no lado que couber; sem espaço em nenhum,
+        // encosta na borda e sobrepõe o painel.
+        const cabeDireita = painel.right + folga + w <= window.innerWidth - 6;
+        const esquerda = cabeDireita ? painel.right + folga
+            : painel.left - folga - w >= 6 ? painel.left - folga - w
+            : Math.max(6, window.innerWidth - w - 6);
+
+        // Centralizado na linha, sempre visível por inteiro.
+        const meio = r.top + r.height / 2 - h / 2;
+        const topo = Math.max(6, Math.min(meio, window.innerHeight - h - 6));
+
+        els.tip.style.left = esquerda + 'px';
         els.tip.style.top = topo + 'px';
     }
 
