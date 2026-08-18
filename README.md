@@ -6,86 +6,75 @@ E, desde a versão 5, um **analisador** que responde a pergunta que o jogo não 
 
 ## O analisador
 
-Dois gráficos, porque são duas perguntas diferentes e confundi-las é o erro mais fácil de cometer aqui.
+Dois gráficos, ambos na mesma escala de 0 a 100, mudando só a régua.
 
-**O primeiro é um percentil.** Ele diz a posição do Pokémon entre todos os da mesma raridade daquela espécie. "87%" significa melhor que 87% das Lendárias Machamp possíveis. Shiny é comparado só com shiny, porque a tabela de multiplicador é outra.
+**O primeiro compara com iguais.** Entre todas as Míticas Butterfree que o jogo pode gerar, onde essa cai? 0% é a pior Mítica possível, 100% é a perfeita.
 
-**O segundo é uma razão.** Quanto dos atributos do melhor possível da espécie esse Pokémon alcança. Uma Comum perfeita fica perto de 48%; uma Mítica perfeita, em 100%.
+**O segundo compara com a espécie inteira.** Da pior Fraca à melhor Mítica. É aqui que a raridade aparece: uma Mítica qualquer já marca alto, porque está acima de tudo que veio antes.
 
-A distinção importa mais do que parece. Uma Butterfree Mítica com IV 153 mostra **93% do teto** — o que soa excelente — e ao mesmo tempo está entre as **7% piores Míticas** da espécie. Os dois números estão certos; só respondem coisas diferentes. Uma legenda dentro do cartão explica cada um, para não restar dúvida.
+Os dois juntos separam duas coisas que a raridade sozinha confunde. Uma Butterfree Mítica com IV 153 e qualidade ×1,72 marca **20% entre as Míticas** e **87% na espécie** — ou seja, é um Pokémon forte que teve uma rolagem ruim dentro do tier dele. Uma legenda dentro do cartão explica cada gráfico, para não restar dúvida.
 
-Abaixo dos gráficos vem a explicação em texto: qual atributo ofensivo a espécie usa e quanto do IV caiu no que ela não usa, onde o IV total caiu dentro da faixa do tier, e se a natureza e o gênero ajudaram, atrapalharam ou foram neutros.
+Abaixo dos gráficos vem a explicação em texto: onde o IV e a qualidade caíram dentro das faixas da raridade, se a espécie ataca de físico ou especial, e o que a natureza e o gênero desse exemplar fazem.
 
 ### Como a nota é calculada
 
-Os dois gráficos partem do mesmo número. Para cada um dos seis atributos:
+Só **qualidade e IV total** entram na nota. Natureza, gênero e a distribuição dos IVs ficam de fora — foi decisão da equipe de balanceamento do jogo, e ela tem uma consequência elegante: a fórmula fica fechada.
+
+No nível de referência usado (100), cada atributo vale `2 × base + IV + 5`. Somando os seis, o resultado não depende de **como** o IV foi repartido, porque um ponto vale o mesmo em qualquer atributo:
 
 ```
-atributo = floor((2 × base + IV) × nível/100 + 5)
-         × natureza          ×1,1 no que ela sobe, ×0,9 no que ela desce
-         × gênero            macho ×1,1 em Ataque e Atq. Esp. · fêmea ×1,1 em HP
-         × multiplicador^1,15
-         × shiny             ×1,1744, quando for
-
-nota = Σ (peso do atributo × atributo)
+nota = (2 × soma dos base stats + IV total + 30) × qualidade^1,15
 ```
 
-O nível usado é sempre **100**, nunca o real. Sem isso, um Pokémon recém-capturado (que nasce no nível 1, com atributos entre 7 e 13) seria incomparável com um de nível 150 — e no nível 1 o IV move menos de meio ponto, sumindo no arredondamento.
+O `+30` são os "+5" de cada um dos seis atributos. Shiny multiplica por 1,1744 a mais.
 
-### De onde vêm os pesos
+O nível usado é sempre 100, nunca o real. Sem isso, um Pokémon recém-capturado — que nasce no nível 1, com atributos entre 7 e 13 — seria incomparável com um de nível 150.
 
-Quatro atributos pesam o próprio base stat da espécie: HP, Defesa, Def. Especial e Velocidade. Os dois ofensivos são divididos pela participação de cada um no dano:
+### Por que a nota é normalizada pela faixa
 
-```
-DPS de um golpe   = poder ÷ (recarga em ms ÷ 1000)
-peso[Ataque]      = base_atk × (DPS físico   ÷ DPS total)
-peso[Atq. Esp.]   = base_spa × (DPS especial ÷ DPS total)
-```
+Comparar direto contra o teto engana. O dobro dos base stats é a maior parte do material: numa Butterfree, 770 de 986 pontos, ou 78% do total, são fixos e idênticos em toda Mítica.
 
-O catálogo de golpes do jogo declara a categoria, o poder e a recarga de cada golpe, então essa divisão é dado, não estimativa. Num Machamp, 100% do dano é físico e o peso do Atq. Especial fica em **zero**.
+O resultado é que **toda Mítica Butterfree cai entre 89,6% e 100%** do teto. Uma escala de dez pontos, encostada no topo, onde tudo parece quase perfeito.
 
-Golpes de status (poder 1) são ignorados. Quando os golpes de uma espécie ainda não passaram pela sessão, o fallback compara `base_atk` com `base_spa`, e o cartão avisa qual fonte usou.
-
-### O teto — o "Pokémon perfeito"
-
-Busca exaustiva, sem heurística: para cada uma das combinações de natureza × gênero, distribui o IV máximo do tier de forma ótima e calcula a nota. O maior valor encontrado é o teto.
-
-A distribuição ótima é direta porque o problema é linear: o ganho de um ponto de IV num atributo é `peso × multiplicador da natureza × multiplicador do gênero`, então basta ordenar por esse valor e encher do maior para o menor, respeitando o teto de 31 por atributo.
-
-Uma versão anterior escolhia a natureza pela intuição — a que subia o atributo de maior peso — e produzia um teto **abaixo** do máximo real. O sintoma era rolagens comuns aparecerem acima de 100%.
-
-### Primeiro gráfico — percentil
-
-Simula **1.200 Pokémon** daquele tier, daquela espécie e daquele estado de shiny, e conta quantos ficaram abaixo da sua nota:
-
-- **IV total** sorteado uniforme dentro da faixa do tier, repartido aleatoriamente entre os seis atributos com teto de 31 em cada
-- **Natureza** sorteada entre as 25, com a frequência real — as cinco neutras somam 20%
-- **Gênero** meio a meio
-- **Multiplicador** uniforme dentro da faixa do tier
-
-As notas são ordenadas e guardadas como 101 quantis; a sua posição sai por busca binária. O resultado fica em cache por espécie + tier + shiny, então cada combinação é simulada uma vez por sessão.
-
-### Segundo gráfico — razão contra o teto
+Por isso a nota mede a posição dentro da amplitude possível, não a razão contra o máximo:
 
 ```
-% = nota ÷ nota do melhor Mítico possível × 100
+% = (nota − pior rolagem possível) ÷ (melhor rolagem possível − pior) × 100
 ```
 
-Shiny é comparado com o teto shiny, que usa a outra tabela de multiplicador.
+**Primeiro gráfico:** os extremos são os da própria raridade. 0% é a pior Mítica que o jogo permite (IV 144 e ×1,70), 100% é a melhor (IV 186 e ×1,80).
+
+**Segundo gráfico:** os extremos são os da espécie inteira, da pior Fraca à melhor Mítica. Para shiny, a tabela começa na Épica, então o piso é a pior Épica shiny.
+
+A mesma Butterfree que marcava 92% na razão crua marca **20% entre as Míticas** — ela está a dois pontos do piso e a oito do teto, no quinto inferior da faixa. E marca 87% na espécie inteira, porque uma Mítica qualquer já é muito superior a qualquer coisa abaixo dela.
+
+### De onde vem o perfil de dano
+
+O catálogo de golpes do jogo declara a categoria, o poder e a recarga de cada golpe, então a divisão entre físico e especial é dado, não estimativa:
+
+```
+DPS de um golpe = poder ÷ (recarga em ms ÷ 1000)
+```
+
+Golpes de status são ignorados. Num Machamp, 100% do dano é físico e o cartão avisa que IV em Atq. Especial rende pouco. Numa espécie que ataca 60/40, ele diz que os dois contam — porque contam.
+
+Quando os golpes de uma espécie ainda não passaram pela sessão, o fallback compara os base stats ofensivos, e o cartão diz qual fonte usou.
+
+### O que o cartão NÃO afirma
+
+Algumas informações foram removidas por não serem confiáveis, e vale explicar o critério.
+
+O cartão já ofereceu um ranking de "onde o IV rende mais" e um "gênero ideal". Os dois saíam de ponderar cada atributo pelo base stat da espécie — uma suposição, não uma regra do jogo. E ela dava resultados errados: numa Butterfree, que ataca 73% de físico, o peso empurrava o Ataque para o fim da lista porque o base dele é baixo.
+
+O que ficou é o que se apoia em dado do jogo: a divisão do dano, a posição do IV e da qualidade dentro das faixas, e o efeito literal do gênero — macho dá +10% em Ataque e Atq. Especial, fêmea dá +10% em HP. Qual dos dois é melhor depende do que você quer do Pokémon, e o cartão não finge saber.
 
 ### Premissas e limites
 
-Vale saber onde a conta é dado do jogo e onde é modelo meu.
+**Multiplicadores comuns se cancelam.** Maestria elemental e o bônus por nível de treinador não entram na conta porque se aplicam igualmente ao Pokémon e aos extremos da faixa. A posição relativa não muda.
 
-**A distribuição sorteada é assumida uniforme.** Eu não confirmei como o jogo sorteia IV total e multiplicador dentro das faixas. Se ele concentrar no meio em vez de espalhar, o percentil fica torto nas pontas — um Pokémon extremo pareceria menos extremo do que é.
+**O DPS ignora tipo, crítico e variância.** É poder dividido por recarga. Efetividade elemental, os 6,25% de crítico e a variância de 0,85 a 1,00 do dano não entram no perfil.
 
-**Os pesos defensivos são escolha minha.** Que HP, Defesa, Def. Especial e Velocidade valham proporcionalmente ao base stat é uma suposição razoável, não uma medição. A divisão entre físico e especial vem do jogo; a importância relativa de defesa contra velocidade, não.
-
-**O DPS ignora tipo, crítico e variância.** É poder dividido por recarga. Efetividade elemental, os 6,25% de crítico e a variância de 0,85 a 1,00 do dano não entram.
-
-**Multiplicadores comuns se cancelam.** Maestria elemental e o bônus por nível de treinador não aparecem na conta porque se aplicam igualmente ao seu Pokémon e ao teto. A razão entre os dois não muda.
-
-**1.200 amostras dão resolução de cerca de 1%.** Diferenças menores que isso no percentil são ruído da simulação.
+**A nota não mede utilidade em combate.** Ela mede o quanto o Pokémon aproveitou do que a raridade dele permitia. Um Pokémon com nota alta e natureza ruim pode render menos que um de nota mais baixa e genética favorável.
 
 ### Onde ele aparece
 
