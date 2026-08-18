@@ -1,20 +1,18 @@
 // ==UserScript==
 // @name         Pokepixel — Raridades
 // @namespace    https://pokepixel.nietore.com/
-// @version      5.2.1-debug
+// @version      7.1.0
 // @description  Conta tentativas e capturas por qualidade (Fraca a Mítica) lendo os eventos de captura do jogo.
 // @author       Lfmagliano
 // @homepageURL  https://github.com/Lfmagliano/pokepixel-raridades
 // @supportURL   https://github.com/Lfmagliano/pokepixel-raridades/issues
-// @downloadURL  none
-// @updateURL    none
+// @downloadURL  https://raw.githubusercontent.com/Lfmagliano/pokepixel-raridades/main/pokepixel-rarity-tracker.user.js
+// @updateURL    https://raw.githubusercontent.com/Lfmagliano/pokepixel-raridades/main/pokepixel-rarity-tracker.user.js
 // @license      MIT
 // @match        https://pokepixel.nietore.com/play*
 // @run-at       document-start
 // @grant        GM_setValue
 // @grant        GM_getValue
-// @grant        GM_setClipboard
-// @grant        GM_registerMenuCommand
 // @grant        unsafeWindow
 // ==/UserScript==
 
@@ -175,11 +173,6 @@
     // Global, sem accountId: base stats do Machamp são os mesmos nas duas contas.
     const SPECIES_KEY = 'pokepixel_species_cache_v1';
 
-    // TEMPORÁRIO (build de instrumentação): guarda os payloads crus que o jogo
-    // já busca sozinho, só para o ppDump(). Nada disso é requisitado pelo
-    // script — é a mesma resposta que a página recebeu, lida via clone().
-    const cru = { formulas: null, species: [], enemies: [], creatures: null,
-                  reqs: [], chat: [], telas: [], slotMiss: [], raioX: [] };
     const POS_KEY = 'pokepixel_rarity_tracker_fab';   // posição do botão é global
     const emptyTally = () => RARITY_KEYS.reduce((acc, k) => (acc[k] = 0, acc), {});
 
@@ -337,92 +330,7 @@
         try { GM_setValue(POS_KEY, JSON.stringify(fabPos)); } catch (e) { /* ignora */ }
     };
 
-    /* ---------------------------------------------------------------
-     * TEMPORÁRIO — build de instrumentação
-     *
-     * Junta o que o jogo já mandou nesta sessão (formulas, espécies) com
-     * algumas capturas do log, para conferir a fórmula de atributo. Não
-     * dispara requisição nenhuma: tudo aqui já passou pelo clone() do
-     * interceptador. Remover junto com `cru` quando não for mais preciso.
-     * ------------------------------------------------------------- */
 
-    /* ---------------------------------------------------------------
-     * TEMPORÁRIO — captura de estrutura
-     *
-     * Só lê o que já está na tela e o que o jogo já pediu. Nada é enviado,
-     * nada é requisitado. Textos livres são substituídos por «texto:N»
-     * para não carregar conversa de ninguém junto com a estrutura.
-     * ------------------------------------------------------------- */
-    const CAMPO_LIVRE = /(message|content|body|text|msg|nickname|comment)/i;
-
-    function redigir(v, prof) {
-        if (prof > 6) return '…';
-        if (v === null || typeof v === 'number' || typeof v === 'boolean') return v;
-        if (typeof v === 'string') return v.length > 24 ? `«texto:${v.length}»` : v;
-        if (Array.isArray(v)) return v.slice(0, 8).map(x => redigir(x, prof + 1));
-        if (typeof v === 'object') {
-            const o = {};
-            for (const [k, val] of Object.entries(v).slice(0, 40)) {
-                o[k] = CAMPO_LIVRE.test(k) && typeof val === 'string'
-                    ? `«texto:${val.length}»` : redigir(val, prof + 1);
-            }
-            return o;
-        }
-        return String(typeof v);
-    }
-
-    // Esqueleto do DOM: tag, id, classes e data-*. É nos data-* que costuma
-    // estar o id da criatura, que é o que decide se dá para casar um card com
-    // a criatura certa — sem isso, vinte Gravelers iguais viram um chute.
-    function esqueleto(el, prof, orc) {
-        if (!el || prof > 16 || orc.n > 9000) return null;
-        // O chat tem 100 linhas de estrutura idêntica e engolia o orçamento
-        // inteiro, truncando justamente o market. Duas linhas bastam.
-        try {
-            const cl = String(el.className || '');
-            if (cl.indexOf('persistent-chat__line') >= 0) {
-                if (orc.chat >= 2) return { t: el.tagName.toLowerCase(), a: { class: cl }, x: '«linha de chat omitida»' };
-                orc.chat++;
-            }
-        } catch (e) { /* className pode não ser string em SVG */ }
-        orc.n++;
-        const at = {};
-        for (const a of el.attributes || []) {
-            const n = a.name;
-            if (n === 'id' || n === 'class' || n === 'role' || n === 'title'
-                || n.startsWith('data-') || n.startsWith('aria-')) {
-                at[n] = String(a.value).slice(0, 120);
-            }
-        }
-        const filhos = [];
-        for (const c of el.children || []) {
-            const k = esqueleto(c, prof + 1, orc);
-            if (k) filhos.push(k);
-            if (orc.n > 9000) break;
-        }
-        const no = { t: el.tagName.toLowerCase() };
-        if (Object.keys(at).length) no.a = at;
-        if (!filhos.length) {
-            const txt = (el.textContent || '').trim();
-            if (txt) no.x = txt.length > 24 ? `«texto:${txt.length}»` : txt;
-        } else no.c = filhos;
-        return no;
-    }
-
-    function capturarTela() {
-        const D = (typeof document !== 'undefined') ? document : null;
-        if (!D) return null;
-        const orc = { n: 0, chat: 0 };
-        const raizes = [];
-        for (const el of D.body ? D.body.children : []) {
-            if (el.id === 'pp-rt-overlay' || el.id === 'pp-rt-fab') continue;   // o meu próprio painel
-            const r = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
-            if (r && (r.width < 40 || r.height < 40)) continue;                  // invisível
-            const k = esqueleto(el, 0, orc);
-            if (k) raizes.push(k);
-        }
-        return { quando: new Date().toISOString(), nos: orc.n, raizes };
-    }
 
 
     /* ---------------------------------------------------------------
@@ -635,6 +543,24 @@
         return alvo;
     }
 
+    // Slot de Pokémon: tem badge "Nv. N" OU um sprite de criatura, numa caixa
+    // de tamanho de slot. Sem isso, passar o mouse em qualquer canto da tela
+    // acionaria a identificação pelo cartão.
+    function pareceSlotDePokemon(alvo) {
+        let el = alvo, n = 0;
+        while (el && el.tagName && el !== document.body && n++ < 4) {
+            let r = null;
+            try { r = el.getBoundingClientRect(); } catch (e) { r = null; }
+            if (r && (r.width > 320 || r.height > 320)) return false;
+            if (/Nv\.?\s*\d+/i.test(el.textContent || '')) return true;
+            try {
+                if (el.querySelector && el.querySelector('img[src*="creature"], img[src*="sprite"]')) return true;
+            } catch (e) { /* seletor inválido em SVG */ }
+            el = el.parentElement;
+        }
+        return false;
+    }
+
     function criaturaDoAlvo(alvo) {
         let el = alvo.closest && alvo.closest(SEL_INV);
         if (el) {
@@ -690,7 +616,13 @@
 
         // Última linha: se o jogo abriu o cartão dele para algo sob o mouse,
         // identifica por ali. Cobre Poké Centro, Cassino e HUD da equipe.
-        if (alvo.closest && alvo.closest(SEL_TELAS_EXTRAS)) {
+        // Regra geral, em vez de lista de telas: se o jogo abriu o cartão de
+        // detalhes DELE e o elemento sob o mouse parece um slot de Pokémon,
+        // tenta identificar pelo cartão. Assim vale para a negociação entre
+        // jogadores e para qualquer tela que o jogo adicionar depois, sem eu
+        // precisar conhecer o HTML de cada uma. A conferência de nível logo
+        // abaixo é o que impede casar com o Pokémon errado.
+        if (alvo.closest && (alvo.closest(SEL_TELAS_EXTRAS) || pareceSlotDePokemon(alvo))) {
             const pelaCarta = pelaCartaDoJogo();
             // Âncora TEM que ser o slot, não a grade inteira: com o container
             // como âncora, mover o mouse de um Pokémon para outro mantinha o
@@ -1036,18 +968,6 @@
             };
         }
 
-        // TEMPORÁRIO: guarda o que o algoritmo mediu e onde decidiu pôr o
-        // cartão. Comparado com a tela real, mostra se o erro é de detecção
-        // (obstáculo não visto) ou de decisão (visto e ignorado).
-        ultimoCalculo = {
-            ancora: [Math.round(base.left), Math.round(base.top),
-                     Math.round(base.width), Math.round(base.height)],
-            obstaculos: obs.map(r => [Math.round(r.left), Math.round(r.top),
-                                      Math.round(r.width), Math.round(r.height)]),
-            escolha: [Math.round(melhor.x), Math.round(melhor.y), lw, Math.round(lh)],
-            janela: [W, H],
-        };
-
         cartao.style.left = Math.round(melhor.x) + 'px';
         cartao.style.top = Math.round(melhor.y) + 'px';
     }
@@ -1058,7 +978,6 @@
     const LARG_EMERG = 248;   // último recurso; abaixo disso as pizzas empilham
     const LARG_APERTO = 178;  // com o cartão do jogo aberto: estreito, nunca em cima
     const LARG_PADRAO = 380;  // igual ao cartão do jogo: o analisador vira um par dele
-    let ultimoCalculo = null;
     let gChave = null;
     let gtip = null, gTimer = 0, gAncora = null;
     function cartaoJogo() {
@@ -1082,42 +1001,10 @@
         gSaida = setTimeout(esconderJogo, 400);
     }
 
-    // Registra todo slot que PARECE Pokémon mas que não consegui resolver.
-    function registrarSlotMiss(alvo) {
-        try {
-            if (!alvo || !alvo.closest || cru.slotMiss.length >= 14) return;
-            let caixa = alvo, n = 0, parece = false;
-            while (caixa && caixa.tagName && n++ < 6) {
-                const txt = (caixa.textContent || '').slice(0, 60);
-                const img = caixa.querySelector
-                    && caixa.querySelector('img[src*="creature"], img[src*="sprite"]');
-                if (img || /Nv\.?\s*\d+/i.test(txt)) { parece = true; break; }
-                caixa = caixa.parentElement;
-            }
-            if (!parece || !caixa || !caixa.closest) return;
-            if (caixa.closest('#pp-rt-overlay, #pp-rt-gtip, #pp-rt-fab')) return;
-            const cadeia = [];
-            let cur = caixa, m = 0;
-            while (cur && cur.tagName && m++ < 6) {
-                const at = {};
-                for (const a of cur.attributes || []) at[a.name] = String(a.value).slice(0, 80);
-                const im = cur.querySelector && cur.querySelector('img');
-                cadeia.push({
-                    t: cur.tagName.toLowerCase(), a: at,
-                    img: im ? String(im.getAttribute('src') || '').slice(0, 120) : null,
-                    txt: (cur.textContent || '').trim().slice(0, 40),
-                });
-                cur = cur.parentElement;
-            }
-            const chave = JSON.stringify(cadeia[0]);
-            if (cru.slotMiss.some(c => JSON.stringify(c[0]) === chave)) return;
-            cru.slotMiss.push(cadeia);
-        } catch (e) { /* diagnóstico nunca atrapalha */ }
-    }
 
     function mostrarJogo(alvo) {
         const achado = criaturaDoAlvo(alvo);
-        if (!achado) { registrarSlotMiss(alvo); esconderJogo(); return; }
+        if (!achado) { esconderJogo(); return; }
         clearTimeout(gSaida);
         const chave = (achado.c && (achado.c.id || achado.c.creature_id)) || null;
         // Comparar só o elemento não bastava: no Poké Centro o mesmo slot pode
@@ -1181,60 +1068,7 @@
         window.addEventListener('scroll', esconderJogo, true);
     }
 
-    /* TEMPORÁRIO — raio-X: lista todo elemento com área relevante, com
-     * position, z-index, pointer-events e coordenadas, e ao lado a lista que a
-     * minha detecção enxergou. A comparação entre as duas diz onde está o erro. */
-    function raioX() {
-        const Wj = window.innerWidth, Hj = window.innerHeight;
-        const els = [];
-        let n = 0;
-        const fila = document.body ? [document.body] : [];
-        while (fila.length && n < 12000 && els.length < 260) {
-            const el = fila.pop();
-            const filhos = el.children;
-            for (let i = 0; i < filhos.length && n < 12000; i++) { fila.push(filhos[i]); n++; }
-            if (el === document.body) continue;
-            if (el.id === 'pp-rt-gtip' || el.id === 'pp-rt-overlay' || el.id === 'pp-rt-fab') continue;
-            let r, cs;
-            try { r = el.getBoundingClientRect(); cs = W.getComputedStyle(el); } catch (e) { continue; }
-            if (!r || !isFinite(r.width) || r.width * r.height < 9000) continue;
-            if (cs.display === 'none' || cs.visibility === 'hidden') continue;
-            if (r.right < 0 || r.left > Wj || r.bottom < 0 || r.top > Hj) continue;
-            els.push({
-                t: el.tagName.toLowerCase(), id: el.id || null,
-                cls: String(el.className || '').slice(0, 90),
-                pos: cs.position, z: cs.zIndex, pe: cs.pointerEvents,
-                r: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)],
-            });
-        }
-        return {
-            janela: [Wj, Hj], elementos: els,
-            detectados: flutuantes().map(r => [Math.round(r.left), Math.round(r.top),
-                                               Math.round(r.width), Math.round(r.height)]),
-            ultimoCalculo, slotsNaoResolvidos: cru.slotMiss.length,
-        };
-    }
 
-    function ppDump(n) {
-        // Log inteiro por padrão: ajustar a fórmula exige níveis, naturezas,
-        // gêneros e multiplicadores variados. Poucas amostras não fecham.
-        const amostras = ((state && state.log) || []).slice(0, Number(n) > 0 ? Number(n) : 999)
-            .map(e => ({
-                sp: e.sp, lvl: e.lvl, q: e.q, iv: e.iv, det: e.det,
-                mult: e.mult, bat: e.bat, poder: e.poder,
-                nat: e.nat, gen: e.gen, shiny: e.shiny,
-            }));
-        const bases = {};
-        for (const [id, v] of speciesIndex) if (v && v.base) bases[id] = v.base;
-
-        const pacote = { build: '5.2.1-debug', formulas: cru.formulas, species: cru.species,
-                         enemies: cru.enemies, creatures: cru.creatures, bases, amostras,
-                         reqs: cru.reqs, chat: cru.chat, telas: cru.telas, slotMiss: cru.slotMiss, raioX: cru.raioX,
-                         diag: { criaturas: criaturas.size, anuncios: anuncios.size,
-                                 chatMsgs: chatLinks.size, faixasIv: Object.keys(faixas.iv).length,
-                                 moves: moveIndex.size } };
-        return pacote;
-    }
 
     // Sem expor nada no window da página: os dois comandos aparecem no menu do
     // ícone do Tampermonkey, e só rodam quando clicados.
@@ -1254,63 +1088,8 @@
             + (p.formulas ? 'sim' : 'NÃO');
     }
 
-    function dumpCopiar() {
-        const p = ppDump();
-        const txt = JSON.stringify(p, null, 1);
-        try {
-            GM_setClipboard(txt);
-            alert(dumpResumo(p) + '\n\n' + txt.length + ' caracteres copiados.\nÉ só colar no chat.');
-        } catch (e) {
-            alert('Não consegui copiar. Use a opção de baixar em arquivo.');
-        }
-    }
 
-    function dumpBaixar() {
-        const p = ppDump();
-        const txt = JSON.stringify(p, null, 1);
-        try {
-            const blob = new Blob([txt], { type: 'application/json' });
-            const href = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = href;
-            a.download = 'pokepixel-dump.json';
-            (document.body || document.documentElement).appendChild(a);
-            a.click();
-            a.remove();
-            setTimeout(() => URL.revokeObjectURL(href), 5000);
-        } catch (e) {
-            alert('Não consegui gerar o arquivo: ' + e);
-        }
-    }
 
-    try {
-        if (typeof GM_registerMenuCommand === 'function') {
-            GM_registerMenuCommand('Analisador: raio-X em 6 segundos', () => {
-                alert('Você tem 6 segundos.\n\nLeve o mouse até o Pokémon e DEIXE parado '
-                    + 'até o próximo aviso — preciso da tela com o cartão do jogo aberto.');
-                setTimeout(() => {
-                    try {
-                        cru.raioX.push(raioX());
-                        const t = cru.raioX[cru.raioX.length - 1];
-                        alert('Raio-X ' + cru.raioX.length + ' feito.\n\n'
-                            + t.elementos.length + ' elementos medidos, '
-                            + t.detectados.length + ' detectados como obstáculo, '
-                            + t.slotsNaoResolvidos + ' slots não resolvidos.');
-                    } catch (e) { alert('Falhou: ' + e); }
-                }, 6000);
-            });
-            GM_registerMenuCommand('Analisador: capturar tela atual', () => {
-                const t = capturarTela();
-                if (!t) { alert('Não consegui ler a tela.'); return; }
-                cru.telas.push(t);
-                alert(`Tela ${cru.telas.length} capturada (${t.nos} elementos).\n\n`
-                    + 'Abra a próxima tela e capture de novo. Quando tiver inventário, '
-                    + 'market e uma mensagem de chat com Pokémon, use "baixar dados".');
-            });
-            GM_registerMenuCommand('Analisador: copiar dados', dumpCopiar);
-            GM_registerMenuCommand('Analisador: baixar dados (.json)', dumpBaixar);
-        }
-    } catch (e) { /* ignora */ }
 
     /* ---------------------------------------------------------------
      * Eventos de combate
@@ -1488,17 +1267,6 @@
         const enemy = data && data.enemy;
         if (!enemy || !state) return;
 
-        // TEMPORÁRIO: guarda inimigos crus. Eles vêm no nível do mapa (150),
-        // onde o arredondamento some e o efeito do IV fica mensurável — ao
-        // contrário das capturas, que o jogo rebaixa para nível 1.
-        try {
-            if (cru.enemies.length < 60) {
-                const lv = Number(enemy.level) || 0;
-                const ja = cru.enemies.some(e => e.__k === (enemy.id + '|' + enemy.created_at));
-                if (lv > 1 && !ja) { const c = JSON.parse(JSON.stringify(enemy)); c.__k = enemy.id + '|' + enemy.created_at; cru.enemies.push(c); }
-            }
-        } catch (e) { /* nunca atrapalha a contagem */ }
-
         // Antes da deduplicação: um combat.started repetido no mesmo spawn não
         // conta de novo, mas ainda é sinal de que a caçada está viva.
         ultimoCombate = Date.now();
@@ -1667,6 +1435,13 @@
         if (state.log.length > LOG_CAP) state.log.length = LOG_CAP;
     }
 
+    // Eventos que disparam muitas vezes por segundo e nunca trazem criatura
+    // completa: varrer o corpo deles seria desperdício puro.
+    const EVENTOS_SEM_CRIATURA = new Set([
+        'combat.hit', 'loot.received', 'wild_monster.respawned',
+        'ping', 'pong', 'client.visibility', 'chat.message',
+    ]);
+
     function handleEvent(msg) {
         const { type, seq, data } = msg;
 
@@ -1682,11 +1457,17 @@
             lastSeq = seq;
         }
 
-        // TEMPORÁRIO: guarda a ESTRUTURA de chat.message para descobrir de onde
-        // vem o card de Pokémon marcado. O texto das mensagens é redigido — são
-        // conversas de outras pessoas, e eu preciso do formato, não do conteúdo.
+        // Criaturas que chegam por WebSocket. A oferta do OUTRO jogador numa
+        // negociação nunca passa pelo seu /creatures, então sem isto o
+        // analisador não teria como identificá-la. Os eventos de alta
+        // frequência do combate ficam de fora para não custar nada no farm.
+        if (type && !EVENTOS_SEM_CRIATURA.has(type)) {
+            try { colher(data, 0); } catch (e) { /* nunca atrapalha o evento */ }
+        }
+
+        // Pokémon marcados no chat: só o retrato da criatura é guardado, para
+        // o analisador. O texto das mensagens nunca é lido nem armazenado.
         if (type === 'chat.message') {
-            try { if (cru.chat.length < 12) cru.chat.push(redigir(data, 0)); } catch (e) { /* ignora */ }
             try {
                 if (data && data.id && Array.isArray(data.item_links)) {
                     guardar(chatLinks, data.id, data.item_links.filter(x => x && x.ivs), CAP.chat);
@@ -1749,8 +1530,9 @@
         useAccount(id || ('sessao:' + (hash >>> 0).toString(16).padStart(8, '0')), name || null);
     }
 
-    // O catálogo de espécies vem por HTTP, não pelo WebSocket: é a única
-    // chamada que ainda interessa interceptar.
+    // Várias respostas HTTP alimentam a extensão: espécies, fórmulas, coleção,
+    // equipe, anúncios do mercado, histórico do chat e o analisador nativo.
+    // Todas são lidas via clone(), nunca modificadas.
     const origFetch = W.fetch;
     if (typeof origFetch === 'function') {
         W.fetch = function (...args) {
@@ -1760,21 +1542,6 @@
                 const url = (typeof first === 'string' ? first : (first && first.url)) || '';
                 // Colheita genérica, antes de qualquer tratamento específico.
                 p.then(res => res.clone().json()).then(b => { colher(b, 0); }).catch(() => {});
-                // TEMPORÁRIO: catálogo das requisições, para eu descobrir o que
-                // alimenta o market. Guarda a forma da resposta, não o conteúdo.
-                try {
-                    const limpa = String(url).split('?')[0];
-                    if (cru.reqs.length < 140 && !cru.reqs.some(r => r.url === limpa)) {
-                        const reg = { url: limpa, forma: null };
-                        cru.reqs.push(reg);
-                        p.then(r => r.clone().json())
-                         .then(b => {
-                             const amplo = /market|listing|bazaar|shop|trade/i.test(limpa);
-                             reg.forma = redigir(Array.isArray(b) ? b.slice(0, amplo ? 3 : 1) : b, 0);
-                         })
-                         .catch(() => { reg.forma = 'não-json'; });
-                    }
-                } catch (e) { /* nunca atrapalha a requisição do jogo */ }
                 // O jogo não serve mais catálogo em lista: pede espécie por
                 // espécie, e a URL termina no id (…/species/machamp). O regex
                 // antigo exigia terminar em /species e nunca casava.
@@ -1784,14 +1551,12 @@
                          const d = (b && b.data) || b;
                          const lista = Array.isArray(d) ? d : (d && d.id ? [d] : null);
                          if (!lista) return;
-                         if (cru.species.length < 10) cru.species.push(d);  // TEMPORÁRIO
                          indexSpecies(lista);
                          render();
                      })
                      .catch(() => {});
                 } else if (/\/creatures(\?|$)/.test(url)) {
                     p.then(res => res.clone().json())
-                     .then(b => { cru.creatures = b; indexCreatures(b); })
                      .catch(() => {});
                 } else if (/\/hunts\/analyzer(\?|$)/.test(url)) {
                     p.then(res => res.clone().json()).then(b => { reconciliar(b); }).catch(() => {});
@@ -1814,7 +1579,6 @@
                 } else if (/\/formulas(\?|$)/.test(url)) {
                     p.then(res => res.clone().json())
                      .then(b => {
-                         cru.formulas = b;                                  // TEMPORÁRIO
                          const q = b && (b.quality || b.data && b.data.quality) || b;
                          indexFaixas(q);
                          render();
@@ -2258,6 +2022,9 @@
     .pp-rt-why { margin: 0; padding-left: 16px; }
     .pp-rt-why li { font-size: 13px; line-height: 1.6; color: #c4c4d0; margin-bottom: 5px; }
     .pp-rt-why b { color: #e8e8ef; font-weight: 600; }
+    /* Recomendação: não entra na nota, então tem peso visual menor. */
+    .pp-rt-rec { color: #9a9aa8; }
+    .pp-rt-rec b { color: #c9c9d4; }
     #pp-rt-del {
         background: none; border: 1px solid #4a3a3a; color: #d09a9a;
         border-radius: 4px; padding: 3px 8px; font-size: 11px; cursor: pointer; margin-left: 6px;
@@ -3022,15 +2789,9 @@
 
 
     // Pares (sobe, desce) de todas as naturezas, sem repetição.
-    // Duas listas com propósitos diferentes.
-    //
-    // PARES_NAT tem os pares DISTINTOS e serve para buscar o teto: repetir a
-    // mesma combinação na busca só gastaria tempo.
-    //
-    // NAT_SORTEIO tem UMA ENTRADA POR NATUREZA, incluindo as cinco neutras.
-    // A busca do teto não se importa com frequência, mas o sorteio do percentil
-    // sim: usar a lista deduplicada fazia natureza neutra sair em ~4,8% das
-    // simulações quando no jogo ela sai em 20%, e isso deslocava o percentil.
+    // Pares DISTINTOS de natureza (sobe, desce), usados na busca do teto de
+    // referência que alimenta as recomendações do cartão. A nota em si não
+    // depende de natureza — ver notaCrua().
     const PARES_NAT = (() => {
         const vistos = new Set(), out = [[null, null]];
         for (const v of Object.values(NATUREZAS)) {
@@ -3041,34 +2802,20 @@
         return out;
     })();
 
-    const NAT_SORTEIO = Object.values(NATUREZAS).map(v =>
-        (v && v[1] != null && v[2] != null) ? [ORDEM[v[1]], ORDEM[v[2]]] : [null, null]);
-
-    // Alocação ÓTIMA de um orçamento de IV: o valor de um ponto num atributo é
-    // peso × multiplicador da natureza × do gênero, então basta ordenar por
-    // esse valor efetivo. Distribuir só pelo peso base, como eu fazia, não era
-    // ótimo — e por isso rolagens reais chegavam a superar o "perfeito".
-    function alocarOtimo(base, w, sobe, desce, gen, total) {
-        const val = {};
-        for (const k of ORDEM) {
-            let m = w[k];
-            if (k === sobe) m *= 1.1;
-            if (k === desce) m *= 0.9;
-            if (gen === 'male' && (k === 'atk' || k === 'spa')) m *= 1.1;
-            if (gen === 'female' && k === 'hp') m *= 1.1;
-            val[k] = m;
-        }
+    // Distribuir IV é linear com teto por atributo: encher do maior ganho
+    // marginal para o menor é ótimo. Serve só para a RECOMENDAÇÃO.
+    function alocarOtimo(margem, total) {
         const ivs = {}; for (const k of ORDEM) ivs[k] = 1;
         let resta = Math.max(0, total - 6);
-        for (const k of [...ORDEM].sort((a, b) => val[b] - val[a])) {
-            const d = Math.min(30, resta); ivs[k] += d; resta -= d;
+        for (const k of [...ORDEM].sort((a, b) => margem[b] - margem[a])) {
+            const d = Math.min(IV_STAT_MAX - 1, resta); ivs[k] += d; resta -= d;
             if (!resta) break;
         }
         return ivs;
     }
 
-    // Teto = melhor Pokémon possível daquele tier: busca exata sobre as 25
-    // naturezas e os 2 gêneros, com alocação ótima em cada combinação.
+    // Melhor combinação de natureza e gênero para a espécie, por busca
+    // exaustiva. NÃO entra na nota — alimenta as dicas do cartão.
     function tetoDe(base, w, tier, shiny) {
         const banda = faixaDe(tier, shiny);
         const ivB = faixas.iv[tier];
@@ -3076,73 +2823,76 @@
         let melhor = null;
         for (const [sobe, desce] of PARES_NAT) {
             for (const gen of ['male', 'female']) {
-                const ivs = alocarOtimo(base, w, sobe, desce, gen, ivB.max);
-                const v = somaPesada(base, ivs, sobe, desce, gen, banda.max, shiny, w);
-                if (!melhor || v > melhor.valor) {
-                    melhor = { valor: v, mult: banda.max, iv: ivB.max, nat: { sobe, desce }, gen };
+                const margem = {};
+                for (const k of ORDEM) {
+                    let m = w[k];
+                    if (k === sobe) m *= 1.1;
+                    if (k === desce) m *= 0.9;
+                    if (gen === 'male' && (k === 'atk' || k === 'spa')) m *= 1.1;
+                    if (gen === 'female' && k === 'hp') m *= 1.1;
+                    margem[k] = m;
+                }
+                const ivs = alocarOtimo(margem, ivB.max);
+                const val = somaPesada(base, ivs, sobe, desce, gen, banda.max, shiny, w);
+                if (!melhor || val > melhor.valor) {
+                    melhor = { valor: val, nat: { sobe, desce }, gen };
                 }
             }
         }
         return melhor;
     }
 
-    // Quantis por (espécie, tier, shiny). Calculado uma vez e reaproveitado:
-    // é o que transforma "tem 90% dos atributos do perfeito" em "melhor que N%
-    // dos que existem", que é a pergunta que o jogador realmente faz.
-    const quantisCache = new Map();
-    const AMOSTRAS = 1200;
-
-    function sorteiaIvs(total, out) {
-        let resta = total - 6, soma = 0;
-        for (let i = 0; i < 6; i++) { out[i] = Math.random(); soma += out[i]; }
-        let sobra = resta;
-        for (let i = 0; i < 6; i++) {
-            const v = Math.min(30, Math.floor(out[i] / soma * resta));
-            out[i] = 1 + v; sobra -= v;
-        }
-        let guarda = 0;
-        while (sobra > 0 && guarda++ < 200) {
-            const i = (Math.random() * 6) | 0;
-            if (out[i] < 31) { out[i]++; sobra--; }
-        }
-        return out;
+    /* NOTA — só qualidade e IV, por decisão de balanceamento.
+     *
+     * No nível de referência 100, o atributo é floor(2×base + IV + 5), então a
+     * SOMA dos seis não depende de como o IV foi distribuído: cada ponto vale
+     * o mesmo em qualquer atributo. Por isso a nota sai fechada:
+     *
+     *     nota = (2 × soma dos base + IV total + 30) × multiplicador^1,15
+     *
+     * Natureza e gênero ficam FORA da nota — eles entram no cartão apenas como
+     * recomendação. Incluí-los fazia um Pokémon com genética favorável saturar
+     * a escala e marcar 100% sem estar no máximo de qualidade nem de IV.
+     */
+    function notaCrua(base, ivTotal, mult, shiny) {
+        let soma = 30;                       // os "+5" dos seis atributos
+        for (const k of ORDEM) soma += 2 * base[k];
+        soma += ivTotal;
+        let v = soma * Math.pow(mult, QUAL_EXP);
+        if (shiny) v *= SHINY_STAT;
+        return v;
     }
 
-    function quantisDe(spId, base, w, tier, shiny) {
-        const chave = spId + '|' + tier + '|' + (shiny ? 's' : 'n');
-        const pronto = quantisCache.get(chave);
-        if (pronto) return pronto;
+    // Extremos de um tier: a pior e a melhor rolagem possíveis nele.
+    function extremosDoTier(base, tier, shiny) {
         const banda = faixaDe(tier, shiny);
         const ivB = faixas.iv[tier];
         if (!banda || !ivB) return null;
-
-        const buf = new Array(6);
-        const notas = new Array(AMOSTRAS);
-        for (let i = 0; i < AMOSTRAS; i++) {
-            const total = ivB.min + Math.floor(Math.random() * (ivB.max - ivB.min + 1));
-            sorteiaIvs(total, buf);
-            const ivs = {}; ORDEM.forEach((k, j) => { ivs[k] = buf[j]; });
-            const par = NAT_SORTEIO[(Math.random() * NAT_SORTEIO.length) | 0];
-            const gen = Math.random() < 0.5 ? 'male' : 'female';
-            const mult = banda.min + Math.random() * (banda.max - banda.min);
-            notas[i] = somaPesada(base, ivs, par[0], par[1], gen, mult, shiny, w);
-        }
-        notas.sort((a, b) => a - b);
-        // Guarda 101 quantis em vez da amostra inteira: ocupa pouco e basta.
-        const q = new Array(101);
-        for (let p = 0; p <= 100; p++) q[p] = notas[Math.min(AMOSTRAS - 1, Math.round(p / 100 * (AMOSTRAS - 1)))];
-        quantisCache.set(chave, q);
-        return q;
+        return {
+            piso: notaCrua(base, ivB.min, banda.min, shiny),
+            teto: notaCrua(base, ivB.max, banda.max, shiny),
+            ivMin: ivB.min, ivMax: ivB.max, multMin: banda.min, multMax: banda.max,
+        };
     }
 
-    function percentilDe(q, valor) {
-        if (!q) return null;
-        if (valor <= q[0]) return 0;
-        if (valor >= q[100]) return 100;
-        let lo = 0, hi = 100;
-        while (lo < hi) { const m = (lo + hi) >> 1; if (q[m] < valor) lo = m + 1; else hi = m; }
-        return lo;
+    // Menor e maior tier existentes na tabela em uso. A tabela shiny começa na
+    // Épica, não na Fraca — por isso não dá para fixar 'weak' e 'mythical'.
+    function tiersDaTabela(shiny) {
+        const tem = TIER_ORDEM.filter(t => faixaDe(t, shiny) && faixas.iv[t]);
+        return tem.length ? { menor: tem[0], maior: tem[tem.length - 1] } : null;
     }
+
+    /* Normalização de faixa.
+     *
+     * A razão crua contra o teto comprimia tudo: o dobro dos base stats é ~78%
+     * do material total, então TODA Mítica Butterfree cai entre 89,6% e 100%.
+     * Medindo dentro da amplitude possível, a escala de 0 a 100 volta a ser
+     * usada por inteiro e o número passa a distinguir os rolls.
+     *
+     *     % = (nota − pior possível) ÷ (melhor possível − pior possível)
+     */
+    const normaliza = (v, piso, teto) =>
+        teto > piso ? Math.max(0, Math.min(100, 100 * (v - piso) / (teto - piso))) : 100;
 
     function analisar(e) {
         const sp = e.sp && speciesIndex.get(e.sp);
@@ -3156,30 +2906,80 @@
         const det = Array.isArray(e.det) && e.det.length === 6 ? e.det : null;
         if (!det) return null;
         const ivs = {}; ORDEM.forEach((k, i) => { ivs[k] = det[i]; });
+        const ivTot = ORDEM.reduce((a, k) => a + ivs[k], 0);
 
         const nat = NATUREZAS[String(e.nat || '').toLowerCase()];
         const sobe = nat ? ORDEM[nat[1]] : null;
         const desce = nat ? ORDEM[nat[2]] : null;
         const gen = String(e.gen || '').toLowerCase();
 
-        const atual = somaPesada(base, ivs, sobe, desce, gen, mult, shiny, w);
-        const tTier = tetoDe(base, w, e.q, shiny);
-        const tEsp = tetoDe(base, w, 'mythical', shiny);
-        if (!tTier || !tEsp) return null;
+        const atual = notaCrua(base, ivTot, mult, shiny);
+        const tTier = extremosDoTier(base, e.q, shiny);
+        const tt = tiersDaTabela(shiny);
+        if (!tTier || !tt) return null;
+        const pior = extremosDoTier(base, tt.menor, shiny);
+        const melhor = extremosDoTier(base, tt.maior, shiny);
+        if (!pior || !melhor) return null;
 
-        // ESQUERDA = percentil dentro do tier. A razão pura enganava: os base
-        // stats dominam, então toda Mítica de uma espécie cai entre ~90% e
-        // ~104% do teto — 90% parecia ótimo sendo o fundo da faixa.
-        // DIREITA = fração dos atributos do melhor possível da espécie.
-        const q = quantisDe(e.sp, base, w, e.q, shiny);
+        // Recomendações — não entram na nota, só informam.
+        const ideal = tetoDe(base, w, e.q, shiny);   // busca natureza/gênero ótimos
+
         return {
-            percentil: percentilDe(q, atual),
-            pctTier: Math.max(0, Math.min(100, 100 * atual / tTier.valor)),
-            pctEsp: Math.max(0, Math.min(100, 100 * atual / tEsp.valor)),
-            teto: tTier, pesos: P, ivs, base, sobe, desce, gen, mult, shiny, tier: e.q,
+            // 1º: posição dentro da amplitude do próprio tier.
+            pctTier: normaliza(atual, tTier.piso, tTier.teto),
+            // 2º: posição dentro da amplitude da espécie inteira, do pior roll
+            // do menor tier ao melhor do maior.
+            pctEsp: normaliza(atual, pior.piso, melhor.teto),
+            faixaTier: tTier, tierMenor: tt.menor, tierMaior: tt.maior, ideal,
+            pesos: P, ivs, ivTot, base, sobe, desce, gen, mult, shiny, tier: e.q,
         };
     }
 
+    function explicar(A) {
+        const NOME = { hp: 'HP', atk: 'Ataque', def: 'Defesa', spa: 'Atq. Esp.', spd: 'Def. Esp.', spe: 'Velocidade' };
+        const out = [];
+        const rot = (RARITIES.find(r => r.key === A.tier) || {}).label || A.tier;
+        const fis = Math.round(A.pesos.fis * 100), esp = 100 - fis;
+        const fonte = A.pesos.medido ? 'pelos golpes que aprende' : 'pelos atributos base';
+        const F = A.faixaTier;
+        const n2 = x => x.toFixed(2).replace('.', ',');
+
+        // --- os dois insumos da nota, com a faixa inteira à vista ---
+        out.push(`IV total <b>${A.ivTot}</b> na faixa ${F.ivMin}–${F.ivMax} da ${rot}.`);
+        out.push(`Qualidade <b>×${n2(A.mult)}</b> na faixa ×${n2(F.multMin)}–×${n2(F.multMax)}.`);
+
+        // --- perfil de dano: vem do catálogo de golpes do jogo ---
+        const morto = fis >= 85 ? 'spa' : (esp >= 85 ? 'atk' : null);
+        if (morto) {
+            out.push(`Ataca de <b>${morto === 'spa' ? 'físico' : 'especial'}</b> `
+                + `(${morto === 'spa' ? fis : esp}% do dano, ${fonte}): IV em ${NOME[morto]} rende pouco.`);
+        } else {
+            out.push(`Ataca dos <b>dois lados</b> — ${fis}% físico e ${esp}% especial `
+                + `(${fonte}): IV nos dois conta.`);
+        }
+
+        // --- natureza: só o que se apoia no perfil de dano acima ---
+        const rec = [];
+        if (!A.sobe) {
+            rec.push('Natureza neutra: não altera atributo nenhum.');
+        } else if (morto && A.desce === morto) {
+            rec.push(`Natureza <b>sem custo</b>: o que ela derruba (${NOME[A.desce]}) essa espécie quase não usa.`);
+        } else if (morto && A.sobe === (morto === 'spa' ? 'atk' : 'spa')) {
+            rec.push(`Natureza sobe <b>${NOME[A.sobe]}</b>, que é como essa espécie ataca.`);
+        } else if ((A.desce === 'atk' && fis >= 50) || (A.desce === 'spa' && esp >= 50)) {
+            rec.push(`Natureza derruba <b>${NOME[A.desce]}</b>, que é o lado que essa espécie mais usa para atacar.`);
+        } else {
+            rec.push(`Natureza sobe ${NOME[A.sobe]} e derruba ${NOME[A.desce]}.`);
+        }
+
+        // --- gênero: o efeito, sem dizer qual é "o ideal" ---
+        rec.push(A.gen === 'male'
+            ? 'Macho: +10% em Ataque e Atq. Esp.'
+            : 'Fêmea: +10% em HP.');
+
+        for (const r of rec) out.push(`<span class="pp-rt-rec">${r}</span>`);
+        return out;
+    }
 
     const claro = (hex, f) => {
         const n = parseInt(String(hex).replace('#', ''), 16);
@@ -3220,43 +3020,6 @@
         </div>`;
     }
 
-    // Explica a nota nos três eixos que o jogador controla no que guarda:
-    // quanto de IV veio, se a natureza mexe no que a espécie usa, e o gênero.
-    function explicar(A) {
-        const NOME = { hp: 'HP', atk: 'Ataque', def: 'Defesa', spa: 'Atq. Esp.', spd: 'Def. Esp.', spe: 'Velocidade' };
-        const out = [];
-        const ivB = faixas.iv[A.tier];
-        const ivTot = ORDEM.reduce((a, k) => a + A.ivs[k], 0);
-        const usaFis = A.pesos.fis >= A.pesos.esp;
-        const ofensivo = usaFis ? 'atk' : 'spa';
-        const morto = usaFis ? 'spa' : 'atk';
-        const fonte = A.pesos.medido ? 'pelos golpes que aprende' : 'pelos atributos base';
-
-        out.push(`Usa <b>${NOME[ofensivo]}</b> (${Math.round((usaFis ? A.pesos.fis : A.pesos.esp) * 100)}% do dano, ${fonte}), então IV em ${NOME[morto]} não rende nada.`);
-
-        if (ivB) {
-            const p = Math.round(100 * (ivTot - ivB.min) / Math.max(1, ivB.max - ivB.min));
-            out.push(`IV total <b>${ivTot}</b> na faixa ${ivB.min}–${ivB.max} da ${(RARITIES.find(r => r.key === A.tier) || {}).label || A.tier} (${p}% dela).`);
-            const desperdicio = A.ivs[morto];
-            if (desperdicio >= 20) out.push(`<b>${desperdicio}</b> pontos caíram em ${NOME[morto]}, que essa espécie não usa.`);
-        }
-
-        if (!A.sobe) out.push('Natureza neutra: não ajuda nem atrapalha.');
-        else {
-            const bomSobe = A.sobe === ofensivo || A.sobe === 'spe';
-            const ruimDesce = A.desce === ofensivo;
-            const gratis = A.desce === morto;
-            if (ruimDesce) out.push(`Natureza <b>derruba ${NOME[A.desce]} em 10%</b>, que é justamente o que essa espécie usa para atacar.`);
-            else if (bomSobe && gratis) out.push(`Natureza ideal: sobe ${NOME[A.sobe]} e derruba ${NOME[A.desce]}, que já valia zero.`);
-            else if (gratis) out.push(`Natureza sem custo: o que ela derruba (${NOME[A.desce]}) essa espécie não usa.`);
-            else out.push(`Natureza sobe ${NOME[A.sobe]} e derruba ${NOME[A.desce]}.`);
-        }
-
-        if (A.gen === A.teto.gen) out.push(`Gênero <b>ideal</b> para a espécie.`);
-        else out.push(`${A.gen === 'male' ? 'Macho' : 'Fêmea'}: o outro gênero renderia mais aqui.`);
-
-        return out;
-    }
 
     function motivoFalha(e, ctx) {
         if (!e) {
@@ -3295,16 +3058,20 @@
         return `<div class="pp-rt-tip-sec pp-rt-an">
             <p class="pp-rt-tip-head">Análise</p>
             <div class="pp-rt-pzs">
-                ${pizza(A.percentil == null ? A.pctTier : A.percentil, arcoTier,
-                        'top entre ' + (r.label || '').toLowerCase() + 's' + (A.shiny ? ' shiny' : ''))}
-                ${pizza(A.pctEsp, arcoEsp, 'força vs. ' + alvo)}
+                ${pizza(A.pctTier, arcoTier,
+                        'entre as ' + (r.label || '').toLowerCase() + 's' + (A.shiny ? ' shiny' : ''))}
+                ${pizza(A.pctEsp, arcoEsp, 'entre ' + alvo)}
             </div>
             <p class="pp-rt-leg">
-                <b>1º gráfico:</b> posição dele entre as ${escapeHtml((r.label || '').toLowerCase())}s
-                ${escapeHtml(A.shiny ? 'shiny ' : '')}possíveis desta espécie — 80% quer dizer melhor que
-                80% delas.<br>
-                <b>2º gráfico:</b> quanto dos atributos da melhor ${escapeHtml(A.shiny ? 'shiny ' : '')}possível
-                da espécie ele alcança.
+                <b>1º gráfico:</b> onde ele cai entre as
+                ${escapeHtml((r.label || '').toLowerCase())}s${escapeHtml(A.shiny ? ' shiny' : '')}
+                possíveis desta espécie. 0% é a pior rolagem que a
+                ${escapeHtml((r.label || '').toLowerCase())} permite, 100% é a melhor.<br>
+                <b>2º gráfico:</b> o mesmo, medido na espécie inteira — da pior
+                ${escapeHtml(((RARITIES.find(x => x.key === A.tierMenor) || {}).label || '').toLowerCase())}
+                à melhor ${escapeHtml(((RARITIES.find(x => x.key === A.tierMaior) || {}).label || '').toLowerCase())}
+                ${escapeHtml(A.shiny ? 'shiny' : '')}.<br>
+                Só qualidade e IV entram na nota.
             </p>
             <ul class="pp-rt-why">${explicar(A).map(t => `<li>${t}</li>`).join('')}</ul>
         </div>`;
