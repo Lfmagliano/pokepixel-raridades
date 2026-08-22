@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pokepixel — Raridades
 // @namespace    https://pokepixel.nietore.com/
-// @version      7.8.2
+// @version      7.9.0
 // @description  Conta tentativas e capturas por qualidade (Fraca a Mítica) lendo os eventos de captura do jogo.
 // @author       Lfmagliano
 // @homepageURL  https://github.com/Lfmagliano/pokepixel-raridades
@@ -1679,6 +1679,10 @@
                 const nome = src.captured_by_name.slice(0, 60);
                 if (state.accountName !== nome) { state.accountName = nome; anunciarConta(); }
             }
+            // A dedução do bônus de treinador sai das capturas: com o cache
+            // preso, a primeira leitura (log vazio, fator 1) valeria para
+            // sempre e os perdidos ficariam projetados abaixo do real.
+            treinadorCache = null;
             anunciarCaptura(state.log[0]);
         } else {
             registrarPerdido(data, rarity, key);
@@ -1709,6 +1713,133 @@
     // que sempre precede a bola. Se o inimigo retido for de outro combate (a
     // qualidade não bate), grava o que o próprio evento oferece em vez de
     // inventar um Pokémon errado.
+    /* ---------------------------------------------------------------
+     * PROJEÇÃO PARA O NÍVEL DE CAPTURA
+     *
+     * O selvagem que escapou vem no nível do mapa; uma captura nasce no
+     * nível 1. Mostrar 2.846 ao lado de capturas de 105 não compara nada.
+     * Por isso o perdido é projetado para o que ele SERIA se a bola
+     * tivesse acertado.
+     *
+     * A conta é a fórmula do jogo, aplicada no nível 1. Tudo o que ela
+     * precisa a extensão já tem: base stats vindos do próprio jogo, IV
+     * por atributo, multiplicador, natureza, gênero e shiny.
+     *
+     * O único dado ausente é o bônus de treinador (+2% a cada 10 níveis),
+     * que entra nos SEUS Pokémon e não no selvagem — sem ele o perdido
+     * sairia sistematicamente abaixo das capturas. O jogo não expõe esse
+     * nível em nada que a extensão leia, mas o multiplicador está
+     * embutido em toda captura registrada, e dá para recuperá-lo.
+     * ------------------------------------------------------------- */
+    const HP_ESCALA = 3;
+    const NIVEL_CAPTURA = 1;
+
+    // Atributo antes dos multiplicadores. HP tem fórmula própria.
+    function baseCru(chave, base, iv, nivel) {
+        const n = 2 * base + iv;
+        return chave === 'hp'
+            ? Math.trunc((n * nivel / 100 + nivel + 10) * HP_ESCALA)
+            : Math.trunc(n * nivel / 100) + 5;
+    }
+
+    function fatoresDe(e) {
+        const v = NATUREZAS[String(e.nat || '').toLowerCase()];
+        const sobe = v && v[1] != null ? ORDEM[v[1]] : null;
+        const desce = v && v[2] != null ? ORDEM[v[2]] : null;
+        return {
+            nat: k => (k === sobe ? 1.1 : k === desce ? 0.9 : 1),
+            gen: k => (e.gen === 'male' && (k === 'atk' || k === 'spa') ? 1.1
+                     : e.gen === 'female' && k === 'hp' ? 1.1 : 1),
+            qual: Math.pow(Math.max(Number(e.mult) || 0, 0.0001), QUAL_EXP)
+                  * (e.shiny ? SHINY_STAT : 1),
+        };
+    }
+
+    // Atributo final pela fórmula do jogo: natureza dentro, gênero por fora.
+    function atributoEm(chave, base, iv, nivel, f, treinador) {
+        const cru = baseCru(chave, base, iv, nivel) * f.nat(chave);
+        return Math.max(1, Math.round(Math.round(cru * f.qual * treinador) * f.gen(chave)));
+    }
+
+    // Bônus de treinador deduzido das próprias capturas. Defesa e Def. Esp.
+    // não sofrem gênero, então quando a natureza também não as toca sobra
+    // exatamente base × qualidade × treinador — e o treinador se isola.
+    // No nível 1 os valores são pequenos e o arredondamento pesa, por isso a
+    // estimativa é a MEDIANA de muitas amostras, encaixada na grade de 0,02.
+    let treinadorCache = null;
+    function fatorTreinador() {
+        if (treinadorCache !== null) return treinadorCache;
+        const amostras = [];
+        for (const e of (state && state.log) || []) {
+            const sp = e.sp && speciesIndex.get(e.sp);
+            if (!sp || !sp.base || !Array.isArray(e.det) || !Array.isArray(e.bat)) continue;
+            if (!e.lvl || e.lvl !== NIVEL_CAPTURA) continue;
+            const f = fatoresDe(e);
+            for (const k of ['def', 'spd']) {
+                if (f.nat(k) !== 1) continue;              // natureza mexeria aqui
+                const i = ORDEM.indexOf(k);
+                const obs = Number(e.bat[i]) || 0;
+                const cru = baseCru(k, sp.base[k], e.det[i], NIVEL_CAPTURA);
+                if (obs <= 0 || cru <= 0) continue;
+                const t = obs / (cru * f.qual);
+                if (t >= 0.99 && t <= 3) amostras.push(t);
+            }
+        }
+        if (amostras.length < 4) return (treinadorCache = 1);
+        amostras.sort((a, b) => a - b);
+        const mediana = amostras[Math.floor(amostras.length / 2)];
+        // Encaixa na grade real do jogo: 1 + n × 0,02.
+        return (treinadorCache = 1 + Math.max(0, Math.round((mediana - 1) / 0.02)) * 0.02);
+    }
+
+    // Os seis atributos como se a criatura fosse capturada agora, ou null
+    // quando não dá para confiar na conta.
+    //
+    // A confiança é verificada, não presumida: a mesma fórmula é aplicada no
+    // nível em que a criatura FOI vista e comparada com os atributos que o
+    // jogo mandou. Se não baterem, os base stats ou a fórmula não servem para
+    // esta espécie e a projeção é descartada — melhor mostrar o número do
+    // nível real do que um inventado.
+    function projetarNivel1(e) {
+        if (!e || !Array.isArray(e.bat) || !Array.isArray(e.det)) return null;
+        if (!e.lvl || e.lvl <= NIVEL_CAPTURA) return null;
+        const sp = e.sp && speciesIndex.get(e.sp);
+        if (!sp || !sp.base) return null;
+
+        const f = fatoresDe(e);
+        for (let i = 0; i < ORDEM.length; i++) {
+            const k = ORDEM[i];
+            const previsto = atributoEm(k, sp.base[k], e.det[i], e.lvl, f, 1);
+            const obs = Number(e.bat[i]) || 0;
+            // Tolerância de 2%, com piso de 2 pontos para os valores baixos.
+            if (Math.abs(previsto - obs) > Math.max(2, obs * 0.02)) return null;
+        }
+
+        const t = fatorTreinador();
+        return ORDEM.map((k, i) => atributoEm(k, sp.base[k], e.det[i], NIVEL_CAPTURA, f, t));
+    }
+
+    // Atributos a exibir: os projetados quando a criatura não está no nível de
+    // captura, os gravados no resto dos casos.
+    function batDe(e) {
+        return projetarNivel1(e) || (Array.isArray(e && e.bat) ? e.bat : null);
+    }
+
+    // Poder total = soma dos seis atributos. Conferido contra o cartão do
+    // jogo: um Charizard cujos atributos somam 9.383 exibia 9.383.
+    // Derivar aqui, e não só na gravação, cura os perdidos que já estavam
+    // salvos com zero.
+    function poderDe(e) {
+        const bat = batDe(e);
+        if (bat) {
+            let t = 0;
+            for (const v of bat) t += Number(v) || 0;
+            if (t > 0) return Math.round(t);
+        }
+        const gravado = Number(e && e.poder);
+        return Number.isFinite(gravado) && gravado > 0 ? gravado : 0;
+    }
+
     function registrarPerdido(data, rarity, ballKeyName) {
         if (!state) return;
         const inimigo = ultimoInimigo && markQuality(ultimoInimigo.quality) === rarity
@@ -1716,6 +1847,17 @@
         const ivs = inimigo && inimigo.ivs && typeof inimigo.ivs === 'object' ? inimigo.ivs : null;
         const det = ivs ? IV_STATS.map(([k]) => Math.min(Number(ivs[k]) || 0, IV_STAT_MAX)) : null;
         const ivEvento = Number(data && (data.iv_total != null ? data.iv_total : data.ivTotal));
+        const bat = inimigo ? [inimigo.max_hp, inimigo.atk, inimigo.def,
+                               inimigo.spa, inimigo.spd, inimigo.spe].map(v => Number(v) || 0) : null;
+        // O inimigo do combate não traz o campo de poder que a criatura
+        // capturada traz, e o cartão mostrava 0. O poder total é a soma dos
+        // seis atributos — conferido contra o cartão do próprio jogo, que
+        // exibia 9.383 para um Charizard cujos atributos somam 9.383.
+        // Arredondado de propósito: a sanitização do estado usa safeCount, que
+        // devolve 0 para qualquer valor não inteiro. Um total fracionário
+        // sobreviveria à sessão e viraria zero no recarregamento seguinte.
+        const poder = Math.round(Number(inimigo && inimigo.power)
+            || (bat ? bat.reduce((s, v) => s + v, 0) : 0));
 
         state.perdidos.unshift({
             sp: String((inimigo && inimigo.species_id) || '').slice(0, 40),
@@ -1728,9 +1870,8 @@
                              : (Number.isFinite(ivEvento) ? ivEvento : 0), IV_MAX),
             det,
             mult: Number(inimigo && inimigo.quality_multiplier) || 0,
-            bat: inimigo ? [inimigo.max_hp, inimigo.atk, inimigo.def,
-                            inimigo.spa, inimigo.spd, inimigo.spe].map(v => Number(v) || 0) : null,
-            poder: Number(inimigo && inimigo.power) || 0,
+            bat,
+            poder,
             nat: String((inimigo && inimigo.nature) || '').slice(0, 20),
             gen: inimigo && (inimigo.gender === 'male' || inimigo.gender === 'female')
                 ? inimigo.gender : '',
@@ -3569,18 +3710,22 @@
 
         // Cada atributo traz o valor efetivo e o IV que o gerou, como no card
         // do jogo. A seta marca o que a natureza favorece ou prejudica.
+        // Perdido é projetado para o nível de captura, senão o cartão mostraria
+        // um selvagem nível 133 ao lado de capturas nível 1.
+        const batExibido = batDe(e);
+        const projetado = !!(e.lvl && e.lvl > NIVEL_CAPTURA && batExibido !== e.bat);
         const stat = i => {
-            if (!e.bat) return '';
+            if (!batExibido) return '';
             const seta = i === sobe ? '<b class="pp-rt-up">▲</b>'
                 : i === desce ? '<b class="pp-rt-down">▼</b>' : '';
             const iv = e.det ? `${e.det[i]}<span class="pp-rt-ivmax">/${IV_STAT_MAX}</span>` : '—';
             return `<div class="pp-rt-bat">
                 <span>${BAT_STATS[i]}${seta}</span>
-                <b>${fmt(e.bat[i])}</b><i>${iv}</i>
+                <b>${fmt(batExibido[i])}</b><i>${iv}</i>
             </div>`;
         };
 
-        const atributos = e.bat
+        const atributos = batExibido
             ? BAT_ORDEM.map(([a, b]) => stat(a) + stat(b)).join('')
             : '<p class="pp-rt-tip-vazio">Sem dados desta captura.</p>';
 
@@ -3620,7 +3765,7 @@
 
             <div class="pp-rt-tip-caixas">
                 <div class="pp-rt-caixa">
-                    <p>Poder total</p><b>${fmt(e.poder || 0)}</b>
+                    <p>Poder total</p><b>${fmt(poderDe(e))}</b>
                 </div>
                 <div class="pp-rt-caixa">
                     <p>IV total</p><b>${fmt(e.iv)}<i>/${IV_MAX}</i></b>
@@ -3644,7 +3789,8 @@
             ${analiseHtml(e)}
 
             <div class="pp-rt-tip-sec">
-                <p class="pp-rt-tip-head">Atributos de batalha</p>
+                <p class="pp-rt-tip-head">Atributos de batalha${projetado
+                    ? ' <span class="pp-rt-fonte">— como seriam capturado (Nv. 1)</span>' : ''}</p>
                 <div class="pp-rt-bat-grid">${atributos}</div>
             </div>
 
