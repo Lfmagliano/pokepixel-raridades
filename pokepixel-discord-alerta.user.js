@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pokepixel — Aviso no Discord (companheiro)
 // @namespace    https://pokepixel.nietore.com/
-// @version      1.2.0
+// @version      1.3.0
 // @description  Avisa num canal do Discord quando você captura um Pokémon de raridade igual ou acima do limite que você escolher. Complemento OPCIONAL da extensão Pokepixel — Raridades.
 // @author       Lfmagliano
 // @homepageURL  https://github.com/Lfmagliano/pokepixel-raridades
@@ -307,102 +307,195 @@
     }, 1500);
 
     /* ---------------------------------------------------------------
-     * Configuração pelo menu do Tampermonkey — sem console, sem colar
-     * nada em lugar nenhum da página.
+     * Configuração numa tela própria, sem diálogo do navegador.
+     *
+     * A versão anterior usava prompt() e alert(). Quem desmarca os avisos
+     * do Tampermonkey, ou marca "impedir que esta página crie mais
+     * diálogos" no Chrome, passa a receber null em todo prompt — e a
+     * configuração inteira para de funcionar sem erro nenhum. Nada de
+     * diálogo nativo aqui: entrada por campo, resposta por linha de
+     * status, tudo dentro da página.
      * ------------------------------------------------------------- */
+    const CSS = `
+    #ppd-fundo {
+        position: fixed; inset: 0; z-index: 2147483000; display: none;
+        background: rgba(0,0,0,.6); align-items: center; justify-content: center;
+        font-family: ui-sans-serif, system-ui, sans-serif;
+    }
+    #ppd-fundo.ppd-on { display: flex; }
+    #ppd-painel {
+        width: min(520px, 92vw); max-height: 88vh; overflow: auto;
+        background: #0e0e10; border: 1px solid #2a2a31; border-radius: 14px;
+        color: #e6e6ea; box-shadow: 0 24px 60px rgba(0,0,0,.7); padding: 18px 20px 16px;
+    }
+    #ppd-painel h2 { margin: 0 0 2px; font-size: 15px; letter-spacing: .02em; }
+    #ppd-conta { margin: 0 0 14px; color: #7a7a86; font-size: 11px; }
+    .ppd-campo { margin-bottom: 13px; }
+    .ppd-campo > label {
+        display: block; margin-bottom: 5px; color: #7a7a86;
+        font-size: 10px; letter-spacing: .1em; text-transform: uppercase;
+    }
+    .ppd-campo input[type=text], .ppd-campo input[type=password], .ppd-campo select {
+        width: 100%; box-sizing: border-box; background: #16161a;
+        border: 1px solid #26262e; border-radius: 8px; color: #e6e6ea;
+        padding: 8px 10px; font-size: 12.5px; font-family: inherit;
+    }
+    .ppd-dica { margin: 5px 0 0; color: #6c6c78; font-size: 11px; line-height: 1.45; }
+    .ppd-linha { display: flex; gap: 8px; align-items: center; }
+    .ppd-chk { display: flex; gap: 7px; align-items: center; color: #b9b9c4; font-size: 12px; }
+    #ppd-botoes { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+    .ppd-btn {
+        background: #16161a; border: 1px solid #26262e; border-radius: 9px;
+        color: #b9b9c4; padding: 8px 14px; cursor: pointer;
+        font: 600 12px/1 inherit; letter-spacing: .04em;
+    }
+    .ppd-btn:hover { border-color: #3a3a45; color: #e6e6ea; }
+    .ppd-btn--ok { border-color: #2f5d3a; color: #9fe0b3; }
+    .ppd-btn--ok:hover { border-color: #54d97c; color: #cdf5da; }
+    #ppd-status {
+        margin: 12px 0 0; min-height: 16px; font-size: 12px; line-height: 1.4;
+        color: #8b8b95;
+    }
+    #ppd-status.ppd-bom { color: #9fe0b3; }
+    #ppd-status.ppd-ruim { color: #f0a5a5; }
+    `;
+
+    let ui = null;
+
+    function montarUi() {
+        if (ui) return ui;
+        const est = document.createElement('style');
+        est.textContent = CSS;
+        document.head.appendChild(est);
+
+        const fundo = document.createElement('div');
+        fundo.id = 'ppd-fundo';
+        fundo.innerHTML = `
+            <div id="ppd-painel" role="dialog" aria-modal="true">
+                <h2>Aviso no Discord</h2>
+                <p id="ppd-conta"></p>
+
+                <div class="ppd-campo">
+                    <label for="ppd-hook">Webhook desta conta</label>
+                    <input id="ppd-hook" type="password" spellcheck="false"
+                           placeholder="https://discord.com/api/webhooks/..." />
+                    <p class="ppd-dica">No Discord (no computador): botão direito no canal →
+                       Editar Canal → Integrações → Webhooks → Novo Webhook → Copiar URL.
+                       Deixe em branco para remover.</p>
+                </div>
+
+                <div class="ppd-campo">
+                    <label for="ppd-hook-padrao">Webhook padrão (contas sem o próprio)</label>
+                    <input id="ppd-hook-padrao" type="password" spellcheck="false"
+                           placeholder="opcional" />
+                </div>
+
+                <div class="ppd-campo ppd-linha">
+                    <label class="ppd-chk"><input id="ppd-ver" type="checkbox" /> Mostrar os webhooks</label>
+                </div>
+
+                <div class="ppd-campo">
+                    <label for="ppd-min">Raridade mínima desta conta</label>
+                    <select id="ppd-min"></select>
+                </div>
+
+                <div class="ppd-campo ppd-linha">
+                    <label class="ppd-chk"><input id="ppd-on" type="checkbox" /> Avisos ligados</label>
+                </div>
+
+                <div id="ppd-botoes">
+                    <button class="ppd-btn ppd-btn--ok" id="ppd-salvar" type="button">Salvar</button>
+                    <button class="ppd-btn" id="ppd-teste" type="button">Enviar teste</button>
+                    <button class="ppd-btn" id="ppd-fechar" type="button">Fechar</button>
+                </div>
+                <p id="ppd-status"></p>
+            </div>`;
+        document.body.appendChild(fundo);
+
+        const $ = id => fundo.querySelector('#' + id);
+        ui = {
+            fundo, hook: $('ppd-hook'), padrao: $('ppd-hook-padrao'), ver: $('ppd-ver'),
+            min: $('ppd-min'), on: $('ppd-on'), status: $('ppd-status'), conta: $('ppd-conta'),
+        };
+
+        TIERS.forEach((t, i) => {
+            const o = document.createElement('option');
+            o.value = t; o.textContent = `${i + 1} — ${ROTULO[t]}`;
+            ui.min.appendChild(o);
+        });
+
+        ui.ver.addEventListener('change', () => {
+            const tipo = ui.ver.checked ? 'text' : 'password';
+            ui.hook.type = tipo; ui.padrao.type = tipo;
+        });
+        $('ppd-fechar').addEventListener('click', fecharUi);
+        fundo.addEventListener('click', ev => { if (ev.target === fundo) fecharUi(); });
+        $('ppd-salvar').addEventListener('click', salvarUi);
+        $('ppd-teste').addEventListener('click', testarUi);
+        return ui;
+    }
+
+    function aviso(texto, tipo) {
+        if (!ui) return;
+        ui.status.textContent = texto;
+        ui.status.className = tipo === 'bom' ? 'ppd-bom' : tipo === 'ruim' ? 'ppd-ruim' : '';
+    }
+
+    function abrirUi() {
+        montarUi();
+        if (!contaDaAba) perguntarConta();
+        const mapa = lerMapa();
+        ui.conta.textContent = contaDaAba
+            ? `Conta desta aba: ${contaDaAba}`
+            : 'Conta desta aba ainda não identificada — abra o painel Raridades uma vez. '
+              + 'Até lá, só o webhook padrão vale.';
+        ui.hook.value = (contaDaAba && mapa[contaDaAba]) || '';
+        ui.hook.disabled = !contaDaAba;
+        ui.padrao.value = mapa[PADRAO] || '';
+        ui.min.value = minimoDe(contaDaAba);
+        ui.on.checked = !!ler(K_ON, true);
+        aviso('');
+        ui.fundo.classList.add('ppd-on');
+    }
+
+    function fecharUi() { if (ui) ui.fundo.classList.remove('ppd-on'); }
+
+    function salvarUi() {
+        const par = [[contaDaAba, ui.hook], [PADRAO, ui.padrao]];
+        for (const [chave, campo] of par) {
+            if (!chave) continue;
+            const v = String(campo.value || '').trim();
+            if (v && !webhookValido(v)) {
+                aviso('Isso não parece um webhook do Discord. A URL começa com '
+                    + 'https://discord.com/api/webhooks/', 'ruim');
+                return;
+            }
+            definirWebhook(chave, v);
+        }
+        definirMinimo(contaDaAba || PADRAO, ui.min.value);
+        gravar(K_ON, !!ui.on.checked);
+        aviso('Salvo. Avisando a partir de ' + (ROTULO[ui.min.value] || '?')
+            + (contaDaAba ? ` para a conta ${contaDaAba}.` : ' (padrão).'), 'bom');
+    }
+
+    function testarUi() {
+        salvarUi();
+        if (!webhookDe(contaDaAba)) {
+            aviso('Configure e salve um webhook antes de testar.', 'ruim');
+            return;
+        }
+        enfileirar(montarMensagem({
+            sp: 'charizard', nome: 'Charizard', q: 'epic', iv: 134,
+            det: [27, 31, 11, 31, 29, 5], mult: 1.74, nat: 'serious',
+            gen: 'female', bola: 'Ultra Ball', shiny: true, sold: false,
+        }, contaDaAba || 'teste'), contaDaAba);
+        aviso('Teste enviado. Confira o canal.', 'bom');
+    }
+
     function menu() {
         try {
-            const pedirUrl = (chave, rotulo) => {
-                const mapa = lerMapa();
-                const v = W.prompt(
-                    'Webhook para ' + rotulo + '.\n\n'
-                    + 'Onde achar: no Discord (no computador), clique com o botão direito\n'
-                    + 'no canal → Editar Canal → Integrações → Webhooks → Novo Webhook\n'
-                    + '→ Copiar URL do Webhook.\n\n'
-                    + 'Deixe em branco para remover.', mapa[chave] || '');
-                if (v === null) return;
-                const limpo = String(v).trim();
-                if (!limpo) { definirWebhook(chave, ''); W.alert('Webhook removido de ' + rotulo + '.'); return; }
-                if (!webhookValido(limpo)) {
-                    W.alert('Isso não parece um webhook do Discord.\n\n'
-                        + 'A URL tem que começar com https://discord.com/api/webhooks/');
-                    return;
-                }
-                definirWebhook(chave, limpo);
-                W.alert('Webhook salvo para ' + rotulo + '.\nUse "enviar teste" para conferir.');
-            };
-
-            GM_registerMenuCommand('Aviso Discord: webhook DESTA conta', () => {
-                if (!contaDaAba) perguntarConta();
-                if (!contaDaAba) {
-                    W.alert('Ainda não sei qual conta está nesta aba.\n\n'
-                        + 'Abra o painel Raridades uma vez (o nome da conta aparece no topo)\n'
-                        + 'e tente de novo. Ou use "webhook padrão", que vale para todas.');
-                    return;
-                }
-                pedirUrl(contaDaAba, 'a conta ' + contaDaAba);
-            });
-
-            GM_registerMenuCommand('Aviso Discord: webhook padrão (todas)', () => {
-                pedirUrl(PADRAO, 'qualquer conta sem webhook próprio');
-            });
-
-            GM_registerMenuCommand('Aviso Discord: raridade mínima', () => {
-                // Aplica à conta desta aba quando ela é conhecida; sem conta
-                // identificada, mexe no padrão. O prompt diz qual dos dois,
-                // para não trocar o limite da conta errada sem perceber.
-                const chave = contaDaAba || PADRAO;
-                const rotulo = contaDaAba ? 'a conta ' + contaDaAba : 'o padrão (todas as contas)';
-                const atual = minimoDe(contaDaAba);
-                const lista = TIERS.map((t, i) => `${i + 1} — ${ROTULO[t]}`).join('\n');
-                const v = W.prompt('Avisar a partir de qual raridade, para ' + rotulo + '?\n\n' + lista,
-                    String(TIERS.indexOf(atual) + 1));
-                if (v === null) return;
-                const n = Number(v);
-                if (!Number.isInteger(n) || n < 1 || n > TIERS.length) {
-                    W.alert(`Digite um número de 1 a ${TIERS.length}.`);
-                    return;
-                }
-                definirMinimo(chave, TIERS[n - 1]);
-                W.alert(`Avisando a partir de ${ROTULO[TIERS[n - 1]]} para ${rotulo}.`);
-            });
-
-            GM_registerMenuCommand('Aviso Discord: ligar/desligar', () => {
-                const novo = !ler(K_ON, true);
-                gravar(K_ON, novo);
-                W.alert(novo ? 'Avisos LIGADOS.' : 'Avisos DESLIGADOS.');
-            });
-
-            GM_registerMenuCommand('Aviso Discord: enviar teste', () => {
-                if (!webhookDe(contaDaAba)) {
-                    W.alert('Configure o webhook primeiro.');
-                    return;
-                }
-                enfileirar(montarMensagem({
-                    sp: 'charizard', nome: 'Charizard', q: 'epic', iv: 134,
-                    det: [27, 31, 11, 31, 29, 5], mult: 1.74, nat: 'serious',
-                    gen: 'female', bola: 'Ultra Ball', shiny: true, sold: false,
-                }, contaDaAba || 'teste'), contaDaAba);
-                W.alert('Teste enviado' + (contaDaAba ? ' pelo webhook da conta ' + contaDaAba : '')
-                    + '. Confira o canal.');
-            });
-
-            GM_registerMenuCommand('Aviso Discord: ver configuração', () => {
-                const mapa = lerMapa();
-                // Mostra só o suficiente para identificar, nunca o token inteiro.
-                const curto = u => webhookValido(u)
-                    ? u.replace(/(\/api\/webhooks\/\d+\/).*/, '$1…') : '(nenhum)';
-                const linhas = Object.keys(mapa).sort().map(k =>
-                    (k === PADRAO ? 'padrão' : k) + ': ' + curto(mapa[k]));
-                const mins = lerMinimos();
-                const linhasMin = Object.keys(mins).sort().map(k =>
-                    (k === PADRAO ? 'padrão' : k) + ': ' + (ROTULO[mins[k]] || '?'));
-                W.alert('Conta desta aba: ' + (contaDaAba || '(ainda não identificada)')
-                    + '\n\nWebhooks:\n' + (linhas.length ? linhas.join('\n') : '(nenhum)')
-                    + '\n\nRaridade mínima:\n' + linhasMin.join('\n')
-                    + '\n\nAvisos: ' + (ler(K_ON, true) ? 'ligados' : 'desligados'));
-            });
-        } catch (e) { /* sem menu, o script ainda funciona com o que já foi salvo */ }
+            GM_registerMenuCommand('Aviso Discord: configurar', abrirUi);
+        } catch (e) { /* sem menu, o que já foi salvo continua valendo */ }
     }
 
     menu();
