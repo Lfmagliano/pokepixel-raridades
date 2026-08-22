@@ -4,6 +4,22 @@ Userscript que acumula o que o [Pokepixel](https://pokepixel.nietore.com/play/) 
 
 E, desde a versão 5, um **analisador** que responde a pergunta que o jogo não responde: esse Pokémon é bom? Ele aparece ao passar o mouse em qualquer Pokémon do jogo — inventário, mercado, chat, Poké Centro, cassino e equipe — e diz, com dois números, o quanto ele aproveitou do que poderia ter sido.
 
+A conta que ele faz é **a mesma do [PPTools](https://www.pptools.com.br/qualificadora-de-pokemon)**, com autorização do autor. Os dois dão o mesmo número porque usam a mesma fórmula.
+
+## O que mudou na versão 7.8
+
+| Mudança | Onde |
+| --- | --- |
+| A nota do analisador passou a usar o modelo do PPTools | [Como a nota é calculada](#como-a-nota-é-calculada) |
+| A fórmula de atributo agora é a exata, não mais um ajuste empírico | [Como o jogo funciona](#a-fórmula-de-atributo) |
+| Nova aba **Perdidos**: as bolas gastas que não capturaram | [O que a extensão mostra](#o-que-a-extensão-mostra) |
+| Coluna **Perdidos** no resumo por raridade e por pokébola | idem |
+| Filtro **Forma** (normal / shiny) nos dois registros | idem |
+| Aviso no Discord ao capturar algo raro, por conta | [Aviso no Discord](#aviso-no-discord-opcional) |
+| O analisador não aparece mais no mapa de caçadas | [Onde ele aparece](#onde-ele-aparece) |
+| IV por atributo com contraste legível no cartão | — |
+| Zerar e excluir confirmam **dentro do painel**, em dois cliques | [Estatísticas por hunt](#estatísticas-por-hunt) |
+
 ## O analisador
 
 Dois gráficos, ambos na mesma escala de 0 a 100, mudando só a régua.
@@ -18,17 +34,25 @@ Abaixo dos gráficos vem a explicação em texto: onde o IV e a qualidade caíra
 
 ### Como a nota é calculada
 
-Só **qualidade e IV total** entram na nota. Natureza, gênero e a distribuição dos IVs ficam de fora — foi decisão da equipe de balanceamento do jogo, e ela tem uma consequência elegante: a fórmula fica fechada.
+A nota usa **a mesma fórmula do [PPTools](https://www.pptools.com.br/qualificadora-de-pokemon)**, a qualificadora de Pokémon da comunidade. O autor (bar / gcanivel) cedeu a fórmula e autorizou o uso — o crédito aparece no próprio cartão, ao lado do título.
 
-No nível de referência usado (100), cada atributo vale `2 × base + IV + 5`. Somando os seis, o resultado não depende de **como** o IV foi repartido, porque um ponto vale o mesmo em qualquer atributo:
+Isso importa por um motivo prático: se você conferir o mesmo Pokémon aqui e lá, os números batem. Não são duas contas concorrentes disputando qual está certa; é a mesma conta, feita em dois lugares.
+
+Entram na nota **qualidade, IV, natureza e gênero** — exatamente o que o jogo aplica ao calcular cada atributo:
 
 ```
-nota = (2 × soma dos base stats + IV total + 30) × qualidade^1,15
+qualidade  = multiplicador ^ 1,15
+natureza   = ×1,1 no atributo que sobe, ×0,9 no que desce
+gênero     = macho ×1,1 em Ataque e Atq. Especial
+             fêmea ×1,1 em HP
+shiny      = ×1,1744   (1,15 ^ 1,15)
 ```
 
-O `+30` são os "+5" de cada um dos seis atributos. Shiny multiplica por 1,1744 a mais.
+Os seis atributos são calculados um a um com esses multiplicadores e somados. O nível usado é sempre o de referência (100), nunca o real — sem isso, um Pokémon recém-capturado, que nasce no nível 1 com atributos entre 7 e 13, seria incomparável com um de nível 150.
 
-O nível usado é sempre 100, nunca o real. Sem isso, um Pokémon recém-capturado — que nasce no nível 1, com atributos entre 7 e 13 — seria incomparável com um de nível 150.
+> **Mudou na 7.3.** Até a 7.2, natureza e gênero ficavam **fora** da nota. A justificativa era que incluí-los saturava a escala. O problema é que isso divergia do PPTools e, pior, escondia informação real: a natureza e o gênero mudam os atributos de verdade, e um Pokémon com genética favorável é de fato melhor. A solução não foi ignorá-los, foi normalizar direito — ver abaixo.
+
+Ficam de fora a maestria elemental e o bônus por nível de treinador, porque se aplicam igualmente ao Pokémon e aos extremos da faixa: a posição relativa não muda.
 
 ### Por que a nota é normalizada pela faixa
 
@@ -42,7 +66,9 @@ Por isso a nota mede a posição dentro da amplitude possível, não a razão co
 % = (nota − pior rolagem possível) ÷ (melhor rolagem possível − pior) × 100
 ```
 
-**Primeiro gráfico:** os extremos são os da própria raridade. 0% é a pior Mítica que o jogo permite (IV 144 e ×1,70), 100% é a melhor (IV 186 e ×1,80).
+**Primeiro gráfico:** os extremos são os da própria raridade. 0% é a pior Mítica que o jogo permite, 100% é a melhor.
+
+Como natureza e gênero entram na conta, os extremos também os consideram: o piso é a pior combinação possível de IV, qualidade, natureza e gênero dentro do tier, e o teto é a melhor. É isso que impede a saturação — um Pokémon de genética perfeita não marca 100% se a rolagem de IV e qualidade foi ruim, porque o teto contra o qual ele é medido também tem genética perfeita.
 
 **Segundo gráfico:** os extremos são os da espécie inteira, da pior Fraca à melhor Mítica. Para shiny, a tabela começa na Épica, então o piso é a pior Épica shiny.
 
@@ -66,7 +92,9 @@ Algumas informações foram removidas por não serem confiáveis, e vale explica
 
 O cartão já ofereceu um ranking de "onde o IV rende mais" e um "gênero ideal". Os dois saíam de ponderar cada atributo pelo base stat da espécie — uma suposição, não uma regra do jogo. E ela dava resultados errados: numa Butterfree, que ataca 73% de físico, o peso empurrava o Ataque para o fim da lista porque o base dele é baixo.
 
-O que ficou é o que se apoia em dado do jogo: a divisão do dano, a posição do IV e da qualidade dentro das faixas, e o efeito literal do gênero — macho dá +10% em Ataque e Atq. Especial, fêmea dá +10% em HP. Qual dos dois é melhor depende do que você quer do Pokémon, e o cartão não finge saber.
+O que ficou é o que se apoia em dado do jogo: a divisão do dano, a posição do IV e da qualidade dentro das faixas, e o efeito literal do gênero — macho dá +10% em Ataque e Atq. Especial, fêmea dá +10% em HP.
+
+Esses multiplicadores **entram na nota**, porque são regra do jogo e mudam os atributos de verdade. O que o cartão continua sem fazer é dizer qual gênero é "o ideal" para você: a nota soma os seis atributos com o mesmo peso, e se você quer um atacante puro ou um muro de HP é uma decisão sua, não da aritmética.
 
 ### Premissas e limites
 
@@ -74,7 +102,7 @@ O que ficou é o que se apoia em dado do jogo: a divisão do dano, a posição d
 
 **O DPS ignora tipo, crítico e variância.** É poder dividido por recarga. Efetividade elemental, os 6,25% de crítico e a variância de 0,85 a 1,00 do dano não entram no perfil.
 
-**A nota não mede utilidade em combate.** Ela mede o quanto o Pokémon aproveitou do que a raridade dele permitia. Um Pokémon com nota alta e natureza ruim pode render menos que um de nota mais baixa e genética favorável.
+**A nota não mede utilidade em combate.** Ela mede o quanto o Pokémon aproveitou do que a raridade dele permitia, somando os seis atributos com o mesmo peso. Um Pokémon com nota alta pode render menos que um de nota mais baixa se os atributos dele estiverem no lugar errado para a sua estratégia.
 
 ### Onde ele aparece
 
@@ -88,6 +116,8 @@ O que ficou é o que se apoia em dado do jogo: a divisão do dano, a posição d
 
 Nas três últimas telas os slots não carregam identificador nenhum no HTML. A saída foi ler o cartão de detalhes que o jogo já exibe — nível, multiplicador, IV total e espécie identificam a criatura sem ambiguidade. Havendo empate, o cartão não aparece: mostrar o Pokémon errado seria pior que não mostrar nada.
 
+**Onde ele não aparece:** no mapa de caçadas. Cada área ali é rotulada com "Espécie Nv. N", o que se parece muito com um slot de Pokémon, mas não existe criatura sua nem cartão de detalhes para ler — o analisador ficava pipocando um aviso de indisponível em dezenas de rótulos ao mesmo tempo. A regra passou a ser: sem cartão de detalhes aberto, o analisador não diz nada.
+
 ### Ele nunca cobre o cartão do jogo
 
 O cartão do analisador é posicionado **sempre ao lado** — nunca acima, nunca abaixo, nunca por cima. Se não couber de um lado, vai para o oposto; se não couber em nenhum com a largura confortável, estreita e o conteúdo reflui.
@@ -98,13 +128,21 @@ Painéis de fundo — a mochila, a lista do mercado — podem ser encostados qua
 
 ## O que a extensão mostra
 
-**Por raridade** — tentativas, capturas e taxa de captura de cada qualidade, da Fraca à Mítica, com uma linha "Todos" somando tudo.
+São quatro abas, numa fileira só.
+
+**Por raridade** — tentativas, capturas, **perdidos** e taxa de captura de cada qualidade, da Fraca à Mítica, com uma linha "Todos" somando tudo.
 
 **Por pokébola** — os mesmos números separados por tipo de bola, cada uma com seu ícone nas cores reais. A **Cassino Eevee** tem linha própria: o jogo a conta como captura, mas nenhuma bola foi jogada, e misturá-la distorceria a taxa das bolas de verdade.
 
-**Capturas** — o registro das últimas 100 capturas, uma por linha, com raridade, IV total, natureza, gênero, bola usada e destino. Filtros por **Pokémon**, raridade, faixa de IV e destino. O filtro de espécie lista só o que existe no perfil selecionado, então acompanha a hunt escolhida.
+**Capturas** — o registro das últimas 100 capturas, uma por linha, com raridade, IV total, natureza, gênero, bola usada e destino.
 
-**Detalhes no hover** — o cartão completo do Pokémon, com os atributos de batalha, a genética e a análise.
+**Perdidos** — o registro das últimas 500 bolas gastas que **não** capturaram, no mesmo formato. A última coluna troca o destino pelo **nível** do selvagem, que é informação que o registro de capturas nunca tem: captura nasce no nível 1, o que escapou estava no nível do mapa.
+
+Os dois registros têm filtros por **Pokémon**, raridade, faixa de IV e **forma** (normal ou shiny) — e o de capturas ainda tem o de destino. O filtro de espécie lista só o que existe no perfil selecionado, então acompanha a hunt escolhida. Pokémon shiny aparece com o sprite shiny na linha.
+
+**Detalhes no hover** — nas duas abas, o cartão completo do Pokémon, com os atributos de batalha, a genética e a análise.
+
+Sobre a coluna **Perdidos** no resumo: ela é `tentativas − capturas`, não o tamanho do registro. O registro tem teto de 500; os contadores não têm. Se a coluna saísse da lista, ela pararia de crescer depois de 500 e passaria a mentir — em silêncio, que é pior.
 
 **Estatísticas por hunt** — cada mapa caçado tem seus próprios números, e dá para comparar como está indo no Tyranitar contra como foi no Machamp.
 
@@ -124,6 +162,8 @@ Dois botões atuam sobre o perfil selecionado:
 
 - **Zerar** — os contadores daquela hunt voltam a zero
 - **Excluir perfil** — a hunt some da lista
+
+Os dois pedem confirmação **no próprio botão**: o primeiro clique arma e o texto muda para um aviso em vermelho, o segundo executa, e sozinho ele desarma em 5 segundos. Não é firula — a versão anterior usava o `confirm()` do navegador, que falha em silêncio: depois de alguns diálogos o Chrome oferece "impedir que esta página crie mais diálogos", e quem marca isso passa a receber uma recusa automática em toda chamada seguinte. O botão simplesmente parava de funcionar, sem erro nenhum.
 
 Nos dois casos os números dela **saem do total**, do contrário o total guardaria valores que não aparecem em perfil nenhum.
 
@@ -155,19 +195,30 @@ Shiny tem tabela própria de multiplicador: Épica 1,70–1,79, Lendária 1,80�
 
 Como IV e multiplicador são sorteios separados, **duas Lendárias da mesma espécie podem ter IV parecido e força bem diferente** — e é o multiplicador que pesa mais.
 
-**A fórmula de atributo**, ajustada em 200 valores medidos e conferida em 184 deles com erro máximo de 2 pontos:
+### A fórmula de atributo
+
+Até a 7.7 este README trazia uma fórmula **ajustada empiricamente** em 200 valores medidos, que acertava 184 deles com erro de até 2 pontos. Agora ela é a fórmula **exata**, cedida junto com o resto pelo autor do PPTools:
 
 ```
-atributo = round(
-    floor((2 × base + IV) × nível/100 + 5)
-    × natureza     (×1,1 no que sobe, ×0,9 no que desce)
-    × gênero       (macho ×1,1 em Ataque e Atq. Esp. · fêmea ×1,1 em HP)
-    × multiplicador^1,15
-    × shiny        (×1,1744)
-)
+HP     = trunc( ((2 × base + IV) × nível/100 + nível + 10) × 3 )
+Demais = natureza( trunc((2 × base + IV) × nível/100) + 5 )
+
+qualidade  = max(multiplicador, 0.0001) ^ 1,15
+treinador  = 1 + floor(nível do treinador / 10) × 0,02
+shiny      = 1,15 ^ 1,15   (≈ 1,1744)
+
+combinado  = qualidade × treinador × shiny × inicial
+
+atributo   = max(1, round( round(base × combinado) × gênero ))
 ```
 
-Natureza e gênero entram **antes** do multiplicador de qualidade — o jogo arredonda no meio, e a ordem muda o resultado.
+Três coisas que a versão ajustada não capturava:
+
+- **HP tem fórmula própria**, com `+ nível + 10` e um fator 3 que os outros atributos não têm. A versão antiga usava a mesma conta para os seis.
+- **Natureza entra dentro do atributo base**, antes de qualquer multiplicador; **gênero entra por último**, depois de tudo. O jogo arredonda no meio, então a ordem muda o resultado.
+- **O bônus de treinador entra no mesmo produto** que a qualidade e o shiny.
+
+Nada disso muda a nota do analisador, porque lá a conta é contínua e sem arredondamento intermediário — mas muda quem quiser reproduzir na mão o número exato que o jogo mostra.
 
 Outros detalhes que importam:
 
@@ -185,6 +236,8 @@ Outros detalhes que importam:
 
 Atualizações são verificadas automaticamente pelo Tampermonkey.
 
+O repositório tem um **segundo arquivo, opcional**: `pokepixel-discord-alerta.user.js`, que avisa no Discord quando você captura algo raro. Ele é separado de propósito — veja [Aviso no Discord](#aviso-no-discord-opcional). Quem não quiser aviso nenhum não instala, e nada muda.
+
 ### Se você prefere fixar a versão
 
 A atualização automática é conveniente, mas significa que o código pode mudar sem você revisar. Se você auditou uma versão e quer manter exatamente ela, edite as duas linhas abaixo no cabeçalho da sua cópia local, trocando a URL por `none`:
@@ -194,17 +247,65 @@ A atualização automática é conveniente, mas significa que o código pode mud
 // @updateURL    none
 ```
 
+## Aviso no Discord (opcional)
+
+Um segundo userscript, `pokepixel-discord-alerta.user.js`, avisa num canal do Discord quando você captura um Pokémon de raridade igual ou acima de um limite que você escolhe. Útil para quem deixa a auto-captura rodando e não fica olhando a tela.
+
+### Por que é um arquivo separado
+
+O rastreador principal **não faz requisição nenhuma**, e essa é uma promessa curta e fácil de auditar: abra o arquivo, procure por `fetch`, não vai achar. Um aviso no Discord exige um POST de saída, e um `@connect discord.com` no cabeçalho — a primeira coisa que aparece quando alguém abre o script no Tampermonkey.
+
+Em vez de sacrificar a promessa por um recurso que nem todo mundo quer, os dois foram separados. O principal apenas **anuncia cada captura num evento da própria página**: nada sai do navegador, e sem o companheiro instalado o evento não tem ouvinte. Quem instala só o principal continua com a garantia intacta, verificável linha a linha.
+
+O companheiro, por sua vez, só fala com o Discord. O `@connect discord.com` é a trava: o Tampermonkey recusa qualquer outro destino, inclusive o servidor do jogo. Ele não lê nada por conta própria — não faz `fetch`, não abre WebSocket. A única entrada dele é o evento que o principal emite.
+
+### Como configurar
+
+Faça a parte do Discord **no computador** — o aplicativo de celular não cria webhooks.
+
+1. No canal onde quer receber os avisos: botão direito → **Editar Canal** → **Integrações** → **Webhooks** → **Novo Webhook** → **Copiar URL do Webhook**.
+2. Instale o `pokepixel-discord-alerta.user.js` pelo botão **Raw**, como você fez com o principal. Recarregue o jogo.
+3. Clique no ícone do Tampermonkey na barra do navegador. Os comandos do companheiro aparecem listados:
+
+| Comando | O que faz |
+| --- | --- |
+| **webhook DESTA conta** | O webhook da conta que está nesta aba |
+| **webhook padrão (todas)** | Vale para qualquer conta sem webhook próprio |
+| **raridade mínima** | De qual raridade para cima avisar, para a conta desta aba |
+| **ligar/desligar** | Silencia sem apagar a configuração |
+| **enviar teste** | Manda um exemplo para conferir o canal |
+| **ver configuração** | Mostra tudo, com a URL truncada |
+
+4. Use **enviar teste** e confira se chegou.
+5. No celular, entre no canal pelo app do Discord e ponha as notificações em **Todas as Mensagens** — senão um canal de servidor pode ficar mudo por padrão.
+
+### Duas contas, dois canais
+
+Cada conta pode ter o seu webhook e a sua raridade mínima. Abra a aba de uma conta, configure ali; abra a da outra, configure ali. Cada aba sabe qual conta é a sua, então não tem como trocar.
+
+Uma conta sem webhook próprio usa o padrão, se existir. Se você usava a versão de webhook único, ela é migrada sozinha para "padrão" na primeira execução, e a chave antiga é apagada para não sobrar segredo duplicado.
+
+### Sobre o segredo
+
+A URL do webhook fica no armazenamento do Tampermonkey, em texto puro. Quem tiver acesso ao perfil do seu navegador consegue lê-la, e quem tiver a URL consegue postar naquele canal. Não é catástrofe — dá para apagar o webhook no Discord a qualquer momento e gerar outro —, mas trate como senha: não publique prints dela. O comando **ver configuração** mostra a URL truncada justamente para você poder mandar print sem vazar nada.
+
+### Para desistir
+
+Desinstale o companheiro no Tampermonkey. O principal não muda em nada: ele continua emitindo o evento, ninguém escuta, e nenhuma requisição volta a existir.
+
 ## Isso conta como trapaça?
 
-Não. O script é **somente leitura** e não interfere no jogo:
+Não. O rastreador é **somente leitura** e não interfere no jogo:
 
 - Não envia nada ao servidor. Não existe nenhuma chamada de `send` no código.
-- Não faz requisições próprias. Tudo que ele lê são respostas que o jogo já pediu, clonadas para não consumir o corpo original.
+- Não faz requisições próprias. Tudo que ele lê são respostas que o jogo já pediu, clonadas para não consumir o corpo original. (O aviso no Discord é um [arquivo separado e opcional](#aviso-no-discord-opcional), justamente para esta linha continuar valendo sem asterisco.)
 - Não automatiza nenhuma ação. A auto-captura e a auto-venda são recursos do próprio jogo.
 - Não revela nada oculto. A qualidade aparece na badge de cada Pokémon, e os atributos vêm no próprio evento de captura.
 - Não grava nada nos dados do jogo. Os contadores ficam no armazenamento privado do Tampermonkey.
 
 O analisador não é exceção: ele é aritmética sobre dados que já estão na tela. O que ele acrescenta é a conta que você faria no papel.
+
+Ele **anuncia** cada captura num evento da própria página, para o companheiro opcional do Discord poder escutar. Isso não é rede: é uma mensagem interna do navegador, com os mesmos dados que já estavam na tela, e sem ninguém escutando ela se perde.
 
 Vale saber o que ele **de fato substitui**: `window.WebSocket` e `window.fetch`. Toda chamada segue para a implementação original, e as interceptações ficam dentro de `try/catch` para que uma falha nunca derrube uma requisição do jogo. Mas é uma substituição real, e um jogo que verifique a integridade dessas funções poderia notar. O analisador também insere um cartão ao lado dos painéis do jogo — não altera nada do que já está lá, mas é um elemento a mais no DOM da página. Confirme as regras do seu servidor antes de usar.
 
@@ -214,8 +315,8 @@ O jogo transmite os eventos de combate por WebSocket, cada um numerado sequencia
 
 | Evento | Para quê |
 | --- | --- |
-| `combat.started` | Identifica a espécie da hunt e conta shinies vistos |
-| `capture.failed` | Uma tentativa que não deu certo, com a qualidade e a bola usada |
+| `combat.started` | Identifica a espécie da hunt, conta shinies vistos e guarda o retrato do selvagem |
+| `capture.failed` | Uma tentativa que não deu certo — alimenta a aba Perdidos |
 | `capture.success` | Uma captura, com a criatura completa |
 | `chat.message` | Os Pokémon marcados no chat, para o analisador |
 
@@ -237,7 +338,7 @@ Espécies e golpes são guardados entre sessões, então a cobertura do analisad
 
 ### Limites conhecidos
 
-O registro guarda as **últimas 100 capturas**, e são guardadas as **40 hunts** menos ociosas. Capturas feitas fora de uma caçada entram no total sem serem creditadas a nenhum mapa.
+O registro guarda as **últimas 100 capturas** e os **últimos 500 perdidos**, e são guardadas as **40 hunts** menos ociosas. Perdidos são muito mais frequentes que capturas — na conta de referência, 5.779 bolas para 55 capturas —, por isso o teto maior: 500 cobrem cerca de 50 minutos de caçada contínua. Capturas feitas fora de uma caçada entram no total sem serem creditadas a nenhum mapa.
 
 Não existe evento de "entrei na cidade" além do `/stop`. Se você recarregar a página já estando lá, o cartão leva até um minuto de inatividade para reconhecer que não há caçada.
 
@@ -255,6 +356,8 @@ O script foi revisado por terceiros e as correções sugeridas estão aplicadas 
 - Dados lidos do armazenamento são sanitizados: contadores viram inteiros válidos e textos ganham limite de tamanho.
 - Nenhum fragmento do token de sessão é gravado — quando o JWT não traz um identificador, é usado um valor derivado.
 - O conteúdo do chat de outros jogadores nunca é armazenado.
+
+O repositório traz o `harness.js`, uma suíte de **191 testes** que roda o arquivo publicado num DOM simulado. Ela não testa lógica copiada: carrega o `.user.js` de verdade, simula WebSocket, `fetch` e as APIs do Tampermonkey, e confere o comportamento de fora para dentro — inclusive que nenhuma requisição própria apareceu e que o companheiro do Discord não fala com nada além do Discord. Para rodar: `npm install jsdom` e `node harness.js`.
 
 Se encontrar algo, abra uma [issue](https://github.com/Lfmagliano/pokepixel-raridades/issues).
 

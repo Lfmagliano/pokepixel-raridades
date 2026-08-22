@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pokepixel — Raridades
 // @namespace    https://pokepixel.nietore.com/
-// @version      7.1.0
+// @version      7.8.2
 // @description  Conta tentativas e capturas por qualidade (Fraca a Mítica) lendo os eventos de captura do jogo.
 // @author       Lfmagliano
 // @homepageURL  https://github.com/Lfmagliano/pokepixel-raridades
@@ -78,6 +78,11 @@
         return achou ? achou.key : safeLabel(name || itemId);
     }
 
+    // Do pior para o melhor. Declarado junto das outras constantes de raridade
+    // porque é usado bem acima do ponto onde estava — com `const` isso lançava
+    // ReferenceError, engolido pelo try/catch do hover, e o cartão congelava.
+    const TIER_ORDEM = ['weak', 'common', 'uncommon', 'rare', 'epic', 'legendary', 'mythical'];
+
     const ALIASES = { mythic: 'mythical', legend: 'legendary', normal: 'common' };
     const normalize = q => {
         if (typeof q !== 'string') return null;
@@ -90,6 +95,10 @@
      * Estado persistido
      * ------------------------------------------------------------- */
     const LOG_CAP = 100;        // limite do registro; o armazenamento não é infinito
+    // Perdidos são muito mais frequentes que capturas (na conta de referência,
+    // 5.779 bolas para 55 capturas), então o registro deles precisa de folga.
+    // 500 cobre cerca de 50 minutos de caçada no ritmo medido e ocupa ~135 KB.
+    const LOST_CAP = 500;
     const IV_MAX = 186;         // 31 por atributo, seis atributos
     const IV_STAT_MAX = 31;
     // Ordem e rótulos iguais aos do painel de genética do jogo
@@ -181,9 +190,15 @@
         captures: emptyTally(),     // capture.success
         balls: Object.create(null), // { "Ultra Bola": { attempts, captures } }
         log: [],                    // últimas capturas, da mais recente para a mais antiga
+        perdidos: [],               // bola gasta que não capturou, da mais recente para a mais antiga
         hunts: Object.create(null), // chave da hunt -> contadores próprios
         shinyEncounters: 0,
         shinyCaptures: 0,
+        // Spawns shiny já contados, gravados. O dedupe de combate vive só em
+        // memória: sem esta lista, recarregar a página com um shiny na tela
+        // contava o mesmo encontro de novo, e o número ficava para sempre
+        // acima do analisador do jogo.
+        shinySeen: [],
         accountName: null,
         startedAt: new Date().toISOString(),
     });
@@ -215,6 +230,9 @@
         // subir é legítimo, então aqui não cabe limitar um pelo outro.
         limpo.shinyEncounters = safeCount(value.shinyEncounters);
         limpo.shinyCaptures = safeCount(value.shinyCaptures);
+        limpo.shinySeen = Array.isArray(value.shinySeen)
+            ? value.shinySeen.filter(k => typeof k === 'string' && k.length <= 100).slice(-SHINY_SEEN_CAP)
+            : [];
 
         limpo.balls = migrateBalls(value.balls);
 
@@ -235,28 +253,33 @@
             lim.ultimo = safeCount(h.ultimo) || lim.ultimo;
             limpo.hunts[String(k).slice(0, 80)] = lim;
         }
-        limpo.log = Array.isArray(value.log)
-            ? value.log.filter(e => e && typeof e === 'object').slice(0, LOG_CAP).map(e => ({
-                sp: typeof e.sp === 'string' ? e.sp.slice(0, 40) : '',
-                nome: typeof e.nome === 'string' ? e.nome.slice(0, 40) : '?',
-                q: RARITY_KEYS.includes(e.q) ? e.q : 'weak',
-                lvl: safeCount(e.lvl),
-                iv: Math.min(safeCount(e.iv), IV_MAX),
-                det: Array.isArray(e.det) && e.det.length === IV_STATS.length
-                    ? e.det.map(v => Math.min(safeCount(v), IV_STAT_MAX)) : null,
-                mult: Number.isFinite(e.mult) && e.mult >= 0 ? e.mult : 0,
-                bat: Array.isArray(e.bat) && e.bat.length === IV_STATS.length
-                    ? e.bat.map(v => safeCount(v)) : null,
-                poder: safeCount(e.poder),
-                nat: typeof e.nat === 'string' ? e.nat.slice(0, 20) : '',
-                gen: e.gen === 'male' || e.gen === 'female' ? e.gen : '',
-                bola: typeof e.bola === 'string' ? e.bola.slice(0, 40) : '',
-                sold: !!e.sold,
-                shiny: !!e.shiny,
-                h: typeof e.h === 'string' ? e.h.slice(0, 80) : '',
-                at: typeof e.at === 'string' ? e.at.slice(0, 40) : '',
-            }))
+        // Capturas e perdidos guardam o mesmo retrato de criatura; só o campo
+        // final difere (destino da captura x nível do selvagem que escapou).
+        const limparEntrada = e => ({
+            sp: typeof e.sp === 'string' ? e.sp.slice(0, 40) : '',
+            nome: typeof e.nome === 'string' ? e.nome.slice(0, 40) : '?',
+            q: RARITY_KEYS.includes(e.q) ? e.q : 'weak',
+            lvl: safeCount(e.lvl),
+            iv: Math.min(safeCount(e.iv), IV_MAX),
+            det: Array.isArray(e.det) && e.det.length === IV_STATS.length
+                ? e.det.map(v => Math.min(safeCount(v), IV_STAT_MAX)) : null,
+            mult: Number.isFinite(e.mult) && e.mult >= 0 ? e.mult : 0,
+            bat: Array.isArray(e.bat) && e.bat.length === IV_STATS.length
+                ? e.bat.map(v => safeCount(v)) : null,
+            poder: safeCount(e.poder),
+            nat: typeof e.nat === 'string' ? e.nat.slice(0, 20) : '',
+            gen: e.gen === 'male' || e.gen === 'female' ? e.gen : '',
+            bola: typeof e.bola === 'string' ? e.bola.slice(0, 40) : '',
+            sold: !!e.sold,
+            shiny: !!e.shiny,
+            h: typeof e.h === 'string' ? e.h.slice(0, 80) : '',
+            at: typeof e.at === 'string' ? e.at.slice(0, 40) : '',
+        });
+        const limparLista = (arr, teto) => Array.isArray(arr)
+            ? arr.filter(e => e && typeof e === 'object').slice(0, teto).map(limparEntrada)
             : [];
+        limpo.log = limparLista(value.log, LOG_CAP);
+        limpo.perdidos = limparLista(value.perdidos, LOST_CAP);
         limpo.accountName = typeof value.accountName === 'string'
             ? value.accountName.slice(0, 60) : null;
         limpo.startedAt = typeof value.startedAt === 'string'
@@ -294,6 +317,7 @@
             if (state && name && state.accountName !== name) {
                 state.accountName = name;
                 save();
+                anunciarConta();
             }
             return;
         }
@@ -303,7 +327,33 @@
         lastSeq = 0;
         seenCombat.clear();
         render();
+        anunciarConta();
     }
+
+    // Qual conta está nesta aba. O companheiro do Discord usa isto para saber
+    // a quem pertence a aba ANTES da primeira captura — sem isso, configurar
+    // um webhook por conta só seria possível depois de capturar algo nela.
+    // Evento local, como o de captura: nada sai do navegador.
+    const EVENTO_CONTA = 'pokepixel-raridades:conta';
+    const EVENTO_QUEM = 'pokepixel-raridades:quem';
+    function anunciarConta() {
+        if (!state || !state.accountName) return;
+        try {
+            W.dispatchEvent(new W.CustomEvent(EVENTO_CONTA, {
+                detail: { versao: 1, conta: state.accountName },
+            }));
+        } catch (e) { /* companheiro é opcional */ }
+    }
+
+    // Anunciar só uma vez não bastava: este arquivo roda em document-start e
+    // a conta é identificada quando o WebSocket conecta, o que costuma ser
+    // ANTES de o companheiro (document-idle) estar escutando. O anúncio caía
+    // no vazio e a aba ficava sem dono — de forma intermitente, porque
+    // depende de qual dos dois chega primeiro. Agora quem pergunta é o
+    // companheiro, quando ele está pronto, e aqui só se responde.
+    try {
+        W.addEventListener(EVENTO_QUEM, anunciarConta);
+    } catch (e) { /* companheiro é opcional */ }
 
     let fabPos = null;
     try {
@@ -353,6 +403,9 @@
     // carrega o id, o cartão continua funcionando.
     const SEL_INV = '[data-creature-id]';
     const SEL_MKT = '[data-listing-id]';
+    // Teto de tamanho para considerar algo "o Pokémon apontado". Precisa
+    // acomodar tanto um slot de 56px quanto o card largo do Pokémon ativo.
+    const LARG_ANCORA = 480;
     const SEL_TIME = '.pokeidle-team-card, .pokeidle-team-hud__active, .pokeidle-team-hud__list > *';
     // Telas confirmadas pelo raio-X onde os slots não carregam id.
     // Grades misturam Pokémon, itens e slots vazios: ali o badge "Nv. N" é o
@@ -468,12 +521,22 @@
     // usa o cartão que o PRÓPRIO JOGO abriu como fonte: ele mostra nível,
     // multiplicador e IV total, e essa trinca identifica a criatura no mapa.
     // Assim funciona em qualquer tela, inclusive nas que o jogo criar depois.
-    const NUM = t => Number(String(t).replace(/\./g, '').replace(',', '.'));
+    // O multiplicador nunca tem separador de milhar (vai de 0,90 a 2,60), mas
+    // o separador DECIMAL muda com o idioma do jogo: "×1,74" em português e
+    // "×1.74" em espanhol. A versão antiga apagava todos os pontos, então o
+    // cartão espanhol virava ×174 — fora de qualquer faixa — e o analisador
+    // sumia calado em toda tela sem identificador.
+    const NUM = t => Number(String(t).replace(',', '.'));
+    // Motivo em constante, não em texto solto: ele é comparado em mostrarJogo()
+    // para decidir se vale mostrar o diagnóstico, e duas cópias do mesmo texto
+    // divergiriam em silêncio na primeira vez que uma fosse reescrita.
+    const SEM_CARTA = 'o jogo não abriu o cartão de detalhes';
     function pelaCartaDoJogo() {
         // Pode haver mais de um elemento com essa classe (resíduo do cartão
         // anterior). Pegar o primeiro lia dados velhos, então percorre todos e
         // usa o primeiro VISÍVEL cujo conteúdo realmente se lê.
         let cards = [];
+        motivoCarta = SEM_CARTA;
         try { cards = Array.prototype.slice.call(document.querySelectorAll(SEL_CARD_JOGO)); }
         catch (e) { return null; }
         for (const card of cards.reverse()) {
@@ -485,47 +548,206 @@
         return null;
     }
 
-    function lerCartaDoJogo(card) {
-        const txt = (card.textContent || '').replace(/\s+/g, ' ');
-        const mLv = /N[ÍI]VEL\s+(\d+)/i.exec(txt);
-        const mIv = /IV\s*TOTAL\s*(\d+)\s*\/\s*186/i.exec(txt);
-        const mMu = /×\s*([\d.,]+)/.exec(txt);
-        if (!mLv || !mIv || !mMu) return null;
-        const lv = Number(mLv[1]), iv = Number(mIv[1]), mu = NUM(mMu[1]);
-        if (!lv || !iv || !mu) return null;
+    /* Lê o cartão de detalhes do próprio jogo e MONTA a criatura a partir dele.
+     *
+     * O cartão mostra tudo que a análise precisa: nível, multiplicador, IV
+     * total e o IV de cada atributo individualmente (o "20/31" ao lado de cada
+     * valor). Montar dali, em vez de procurar a criatura nos dados do jogador,
+     * é o que faz a negociação entre jogadores funcionar — o Pokémon do outro
+     * nunca passou pela sua conta.
+     *
+     * O jogo tem interface em português e em inglês, então os dois conjuntos
+     * de rótulos são aceitos.
+     */
+    /* Os IVs por atributo vêm no formato "<rótulo><valor> · <iv>/31", mas o
+     * textContent cola tudo — "ATRIBUTOS DE BATALHAHP4.443·27/31DEF884·31/31".
+     * Depender do rótulo isolado (\bHP\b) falha, porque não há fronteira de
+     * palavra nem antes nem depois dele.
+     *
+     * Então a âncora é o VALOR, que é inconfundível: "· N/31". Para cada
+     * ocorrência, o rótulo é o texto imediatamente anterior, e basta olhar
+     * como ele TERMINA. Funciona com ou sem espaços, em português e inglês. */
+    // Rótulo guloso e com espaço: "DEF SP" precisa ser capturado inteiro, e a
+    // seta de natureza pode aparecer entre o rótulo e o valor.
+    const RE_LINHA_IV = /([A-Za-zÀ-ÿ. ]{2,16})\s*[▲▼]?\s*[\d.,]+\s*[·|]\s*(\d+)\s*\/\s*31/g;
 
-        // O título do cartão traz a espécie. Sem isso, vários Nv.1 do mesmo
-        // tier colidiam na trinca e o resultado virava ambíguo — era por isso
-        // que alguns slots do Poké Centro não mostravam nada.
-        const cabeca = txt.slice(0, 60).toLowerCase();
-        let achada = null, quantos = 0;
-        for (const c of criaturas.values()) {
-            if (Number(c.level) !== lv) continue;
-            if (Math.abs(Number(c.quality_multiplier) - mu) > 0.006) continue;
-            const soma = ORDEM.reduce((a, k) => a + (Number(c.ivs && c.ivs[k]) || 0), 0);
-            if (soma !== iv) continue;
-            const sp = String(c.species_id || '').toLowerCase();
-            if (sp && cabeca.indexOf(sp) < 0) continue;
-            achada = c; quantos++;
-            if (quantos > 1) return null;   // ambíguo: melhor nada que errado
+    // A ordem importa: os compostos são testados antes dos simples, senão
+    // "SP.DEF" cairia em "DEF" e "SPD" (velocidade em inglês) em "SP".
+    // Sufixos de rótulo, sem acento e sem pontuação. Cobrem português, inglês
+    // e espanhol: o cartão espanhol escreve "AT SP" (não "ATK SP"), e sem
+    // 'ATSP' o Atq. Especial não era lido — a soma dos IVs não fechava e o
+    // cartão inteiro era descartado.
+    const ROTULOS_IV = [
+        ['spa', ['ATKSP', 'SPATK', 'ATQESP', 'SPATQ', 'ATSP', 'ATAQUEESP']],
+        ['spd', ['DEFSP', 'SPDEF', 'DEFESP', 'DEFENSAESP']],
+        ['spe', ['VELOCIDADE', 'VELOCIDAD', 'VEL', 'SPEED', 'SPD']],
+        ['atk', ['ATAQUE', 'ATK', 'ATQ', 'AT']],
+        ['def', ['DEFESA', 'DEFENSA', 'DEF']],
+        ['hp',  ['HP', 'PS']],
+    ];
+
+    function ivsDoTexto(txt) {
+        const out = {};
+        RE_LINHA_IV.lastIndex = 0;
+        let m;
+        while ((m = RE_LINHA_IV.exec(txt))) {
+            const rot = m[1].toUpperCase().replace(/[^A-Z]/g, '');
+            for (const [chave, sufixos] of ROTULOS_IV) {
+                if (out[chave] !== undefined) continue;
+                if (sufixos.some(sf => rot.endsWith(sf))) { out[chave] = Number(m[2]); break; }
+            }
         }
-        return achada ? { c: achada, el: card, tipo: 'carta', nivel: lv } : null;
+        return out;
     }
 
-    // Menor caixa razoável em volta do ponteiro: o slot, não o painel.
+    // Descobre o tier pela faixa em que o multiplicador cai, em vez de tentar
+    // ler o rótulo — que muda de idioma.
+    function tierPeloMult(mult, shiny) {
+        for (const t of TIER_ORDEM) {
+            const b = faixaDe(t, shiny);
+            if (b && mult >= b.min - 1e-9 && mult <= b.max + 1e-9) return t;
+        }
+        return null;
+    }
+
+    // Casa o título do cartão com uma espécie conhecida, por nome ou por id.
+    function especiePeloTitulo(cabeca) {
+        const t = cabeca.toLowerCase();
+        let achado = null, tam = 0;
+        for (const [id, sp] of speciesIndex) {
+            const nome = String((sp && sp.name) || '').toLowerCase();
+            for (const cand of [nome, String(id).toLowerCase()]) {
+                if (cand && cand.length > tam && t.indexOf(cand) >= 0) { achado = id; tam = cand.length; }
+            }
+        }
+        return achado;
+    }
+
+    // Motivo da última tentativa de ler o cartão. Aparece no próprio cartão da
+    // extensão quando a identificação falha num slot que claramente é Pokémon —
+    // sem isso, a falha era silenciosa e só dava para investigar pelo console.
+    let motivoCarta = null;
+
+    // O cartão do jogo só mostra o multiplicador com 2 casas ("×1,74"). Um
+    // slot COM identificador resolve pelo índice e usa o valor cheio, então o
+    // MESMO Pokémon marcava notas diferentes em telas diferentes (44% e 45%
+    // no mesmo Charizard) — a faixa de um tier é estreita e 0,002 de
+    // multiplicador já vale um ponto percentual. Aqui procuro o exemplar no
+    // índice para recuperar o valor exato. Casa por espécie, shiny e os seis
+    // IVs, e ainda exige que o valor exato arredonde no que o cartão mostra.
+    function exataDoIndice(spId, det, shiny, mu) {
+        const casa2 = x => Math.round(x * 100) / 100;
+        for (const c of criaturas.values()) {
+            if (!c || (c.species_id || c.source_species_id) !== spId) continue;
+            if (!!c.is_shiny !== !!shiny) continue;
+            const iv = c.ivs;
+            if (!iv || typeof iv !== 'object') continue;
+            let bate = true;
+            for (let i = 0; i < ORDEM.length; i++) {
+                if (Number(iv[ORDEM[i]]) !== det[i]) { bate = false; break; }
+            }
+            if (!bate) continue;
+            const exato = Number(c.quality_multiplier);
+            if (!Number.isFinite(exato) || casa2(exato) !== casa2(mu)) continue;
+            return c;
+        }
+        return null;
+    }
+
+    function lerCartaDoJogo(card) {
+        // textContent cola os elementos sem espaço: o que na tela é
+        // "HP 4.443 · 27/31" chega como "HP4.443·27/31". Sem separar letra de
+        // número, o \b depois do rótulo não encontra fronteira de palavra e
+        // TODOS os padrões de atributo falham de uma vez.
+        const txt = (card.textContent || '')
+            .replace(/([A-Za-zÀ-ÿ])(\d)/g, '$1 $2')
+            .replace(/(\d)([A-Za-zÀ-ÿ])/g, '$1 $2')
+            .replace(/\s+/g, ' ');
+        const mLv = /(?:N[ÍI]VEL|LEVEL)\s+(\d+)/i.exec(txt);
+        const mIv = /(?:IV\s*TOTAL|TOTAL\s*IV)\s*(\d+)\s*\/\s*186/i.exec(txt);
+        const mMu = /×\s*([\d.,]+)/.exec(txt);
+        if (!mLv || !mIv || !mMu) {
+            motivoCarta = 'cartão sem ' + [!mLv && 'nível', !mIv && 'IV total', !mMu && 'multiplicador']
+                .filter(Boolean).join(', ');
+            return null;
+        }
+        const lv = Number(mLv[1]), ivTot = Number(mIv[1]), mu = NUM(mMu[1]);
+        if (!lv || !ivTot || !mu) return null;
+
+        const shiny = /\bSHINY\b/i.test(txt);
+        const cabeca = txt.slice(0, 60);
+        const spId = especiePeloTitulo(cabeca);
+        const q = tierPeloMult(mu, shiny);
+        if (!spId || !q) {
+            motivoCarta = !spId ? `espécie do título não reconhecida ("${cabeca.slice(0, 24)}")`
+                                : `multiplicador ×${mu} fora das faixas conhecidas`;
+            return null;
+        }
+
+        // IV de cada atributo, direto do cartão. Só vale se os seis forem
+        // lidos e a soma bater com o IV total que o próprio cartão informa —
+        // é a checagem que garante que não montei um Pokémon errado.
+        const lidos = ivsDoTexto(txt);
+        const det = [];
+        for (const k of ORDEM) {
+            if (lidos[k] === undefined) { det.length = 0; break; }
+            det.push(lidos[k]);
+        }
+        if (det.length !== 6) { motivoCarta = `só li ${det.length} dos 6 IVs por atributo`; return null; }
+        const soma = det.reduce((a, b) => a + b, 0);
+        if (soma !== ivTot) { motivoCarta = `IVs somam ${soma}, cartão diz ${ivTot}`; return null; }
+        motivoCarta = null;
+
+        let gen = /♀|F[êe]mea|\bHembra\b|\bFemale\b/i.test(txt) ? 'female'
+                : (/♂|\bMacho\b|\bVar[óo]n\b|\bMale\b/i.test(txt) ? 'male' : '');
+        // O cartão vem no idioma do jogo: em português mostra "Séria", não
+        // "serious". Procurar só pela chave em inglês fazia TODA natureza
+        // virar neutra na leitura pelo cartão — invisível enquanto a nota
+        // ignorava natureza, visível agora que ela entra no cálculo.
+        // Acentos saem dos dois lados: \b é ASCII e não casaria "Ingênua".
+        const semAcento = s => String(s).normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+        const txtSa = semAcento(txt);
+        let nat = '';
+        for (const nome of Object.keys(NATUREZAS)) {
+            const rot = semAcento((NATUREZAS[nome] || [])[0] || '');
+            const alvos = rot ? [nome, rot] : [nome];
+            if (alvos.some(a => new RegExp('\\b' + a + '\\b', 'i').test(txtSa))) { nat = nome; break; }
+        }
+
+        // Valor exato quando o mesmo exemplar já está no índice — ver
+        // exataDoIndice(). Sem ele fica o arredondado do cartão, que é tudo
+        // o que o jogo mostra ali.
+        const exemplar = exataDoIndice(spId, det, shiny, mu);
+        const mult = exemplar ? Number(exemplar.quality_multiplier) : mu;
+        const tier = (exemplar && normalize(exemplar.quality)) || tierPeloMult(mult, shiny) || q;
+        if (exemplar) {
+            if (exemplar.nature) nat = String(exemplar.nature).toLowerCase();
+            if (exemplar.gender) gen = String(exemplar.gender).toLowerCase();
+        }
+
+        return {
+            // Id sintético: sem ele, a chave de comparação do hover caía no
+            // elemento, e o laço de reidentificação nunca trocava o conteúdo —
+            // o cartão congelava no primeiro Pokémon da tela. Usa o
+            // multiplicador JÁ resolvido: quando o índice chega depois do
+            // primeiro hover, a chave muda e o cartão se atualiza sozinho.
+            c: { id: `carta:${spId}:${lv}:${mult}:${ivTot}`,
+                 species_id: spId, level: lv, quality: tier, quality_multiplier: mult,
+                 is_shiny: shiny, nature: nat, gender: gen,
+                 ivs: ORDEM.reduce((o, k, i) => (o[k] = det[i], o), {}) },
+            el: card, tipo: 'carta', nivel: lv,
+        };
+    }
+
     // Slot de Pokémon tem badge de nível ("Nv. 126"). Slot de item mostra só a
-    // quantidade, e slot vazio não mostra nada. Sem esse teste, passar o mouse
-    // num item ou num espaço vazio caía no reconhecimento pela carta do jogo e
-    // exibia a análise do último Pokémon que estivera aberto.
+    // quantidade, e slot vazio não mostra nada. Para em caixas de tamanho de
+    // slot: subindo demais, o "Nv." lido vinha de outro elemento da página.
     function nivelDoSlot(el) {
         let cur = el, n = 0;
         while (cur && cur.tagName && cur !== document.body && n++ < 3) {
-            // Para em caixas de tamanho de slot: subindo demais, o "Nv." lido
-            // vinha de outro elemento qualquer da página e a conferência de
-            // nível reprovava um slot que estava certo.
             let r = null;
             try { r = cur.getBoundingClientRect(); } catch (e) { r = null; }
-            if (r && (r.width > 320 || r.height > 320)) break;
+            if (r && (r.width > LARG_ANCORA || r.height > LARG_ANCORA)) break;
             const m = /Nv\.?\s*(\d+)/i.exec(cur.textContent || '');
             if (m) return Number(m[1]);
             cur = cur.parentElement;
@@ -533,11 +755,15 @@
         return null;
     }
 
+    // Sobe do elemento sob o mouse até uma caixa de tamanho de slot.
     function ancoraCompacta(alvo) {
         let cur = alvo, n = 0;
         while (cur && cur.getBoundingClientRect && n++ < 5) {
             const r = cur.getBoundingClientRect();
-            if (r && r.width > 8 && r.width <= 260 && r.height > 8 && r.height <= 260) return cur;
+            // O teto era 260, calibrado para slots de grade. O card do Pokémon
+            // ativo na EQUIPE é um card largo e passava desse limite, então era
+            // descartado e o analisador nunca aparecia nele.
+            if (r && r.width > 8 && r.width <= LARG_ANCORA && r.height > 8 && r.height <= LARG_ANCORA) return cur;
             cur = cur.parentElement;
         }
         return alvo;
@@ -551,7 +777,7 @@
         while (el && el.tagName && el !== document.body && n++ < 4) {
             let r = null;
             try { r = el.getBoundingClientRect(); } catch (e) { r = null; }
-            if (r && (r.width > 320 || r.height > 320)) return false;
+            if (r && (r.width > LARG_ANCORA || r.height > LARG_ANCORA)) return false;
             if (/Nv\.?\s*\d+/i.test(el.textContent || '')) return true;
             try {
                 if (el.querySelector && el.querySelector('img[src*="creature"], img[src*="sprite"]')) return true;
@@ -622,6 +848,18 @@
         // jogadores e para qualquer tela que o jogo adicionar depois, sem eu
         // precisar conhecer o HTML de cada uma. A conferência de nível logo
         // abaixo é o que impede casar com o Pokémon errado.
+        // O cartão do jogo como âncora: quando o Pokémon não vive num slot HTML
+        // — personagem no mapa, que é canvas do PixiJS, ou o próprio cartão sob
+        // o mouse — não há onde ancorar, mas o cartão já descreve a criatura
+        // inteira. Ele serve de âncora de si mesmo.
+        const semSlot = alvo.closest
+            && (alvo.closest(SEL_CARD_JOGO) || alvo.tagName === 'CANVAS');
+        if (semSlot) {
+            const pc = pelaCartaDoJogo();
+            if (pc && pc.c) return { c: pc.c, el: pc.el, tipo: 'carta' };
+            return null;
+        }
+
         if (alvo.closest && (alvo.closest(SEL_TELAS_EXTRAS) || pareceSlotDePokemon(alvo))) {
             const pelaCarta = pelaCartaDoJogo();
             // Âncora TEM que ser o slot, não a grade inteira: com o container
@@ -650,8 +888,10 @@
     // O cartão de detalhes do jogo, confirmado pelo raio-X: classe estável,
     // position fixed, z-index máximo, pointer-events:none (por isso
     // elementsFromPoint nunca o enxergava) e 380px de largura.
-    const SEL_CARD_JOGO = '.pokemon-tooltip-card, .pokemon-card--hover, [class*="pokemon-card"],'
-        + ' [class*="tooltip-card"], [class*="creature-card"]';
+    // Só o cartão de DETALHES. O curinga [class*="creature-card"] que havia
+    // aqui também casava com os cards de criatura do inventário, e o parser,
+    // lendo o primeiro que encontrava, desistia sem tentar o cartão real.
+    const SEL_CARD_JOGO = '.pokemon-tooltip-card, .pokemon-card--hover';
     const cardsDoJogo = () => {
         const out = [];
         const vis = el => {
@@ -1013,7 +1253,30 @@
         gAncora = achado.el; gChave = chave;
         // Nessas telas o cartão do jogo é a única fonte: sem criatura resolvida,
         // some em vez de exibir aviso sobre um slot que talvez nem seja Pokémon.
-        if (!achado.c && achado.tipo === 'carta') { esconderJogo(); return; }
+        if (!achado.c && (achado.tipo === 'carta' || achado.tipo === 'time')) {
+            // Se o slot tem badge de nível, é Pokémon com certeza: mostrar o
+            // motivo ajuda mais que sumir. Sem badge, some (pode ser item).
+            // Estrito: o badge tem que estar no PRÓPRIO elemento apontado, não
+            // num vizinho da mesma grade. E só quando a leitura do cartão
+            // falhou — divergência de nível continua sumindo em silêncio.
+            //
+            // Cartão NENHUM aberto também some. O mapa de caçadas rotula cada
+            // área com "Espécie Nv. N", o que casa com o badge, mas ali não há
+            // criatura sua nem cartão de detalhes — o diagnóstico aparecia em
+            // dezenas de rótulos ao mesmo tempo, sem nada a diagnosticar. O
+            // aviso continua valendo no caso que interessa: o jogo ABRIU um
+            // cartão e a extensão não conseguiu lê-lo.
+            const temBadge = /Nv\.?\s*\d+/i.test((achado.el && achado.el.textContent) || '');
+            if (!temBadge || !motivoCarta || motivoCarta === SEM_CARTA) { esconderJogo(); return; }
+            const c0 = cartaoJogo();
+            c0.innerHTML = `<div class="pp-rt-tip-sec pp-rt-an">`
+                + `<p class="pp-rt-tip-head">Análise</p>`
+                + `<ul class="pp-rt-why"><li>Indisponível: ${escapeHtml(motivoCarta || 'não consegui identificar')}.</li></ul>`
+                + `</div>`;
+            c0.classList.add('pp-on');
+            posicionar(c0, achado.el);
+            return;
+        }
         const e = deCriatura(achado.c);
         const html = analiseHtml(e, achado);
         if (!html) { esconderJogo(); return; }
@@ -1105,6 +1368,8 @@
     // reiniciar; a chave de spawn (id + created_at) evita contar duas vezes.
     const seenCombat = new Set();
     const COMBAT_CAP = 3000;
+    // Shiny é raro: 400 chaves cobrem muito tempo de jogo e custam pouco.
+    const SHINY_SEEN_CAP = 400;
 
     // id da espécie -> { nome, sprite normal, sprite shiny }. Vem do endpoint
     // `species`, que traz a URL exata de cada sprite.
@@ -1248,6 +1513,9 @@
     const HUNT_INATIVA_MS = 60000;
     let ultimoCombate = 0;
     let cacadaEncerrada = false;
+    // Inimigo do combate corrente, do combat.started. Só memória: o que
+    // interessa dele já vai gravado na entrada de perdido.
+    let ultimoInimigo = null;
 
     function encerrarHunt() {
         huntAtual = null;
@@ -1271,6 +1539,13 @@
         // conta de novo, mas ainda é sinal de que a caçada está viva.
         ultimoCombate = Date.now();
         cacadaEncerrada = false;
+
+        // Retrato completo de quem está na tela AGORA. O capture.failed traz
+        // só qualidade, cápsula e IV total — sem isto o registro de perdidos
+        // não teria IV por atributo, natureza, gênero nem multiplicador, e o
+        // cartão de detalhes ficaria pela metade. Guardado antes do dedupe:
+        // um combat.started repetido continua sendo o inimigo corrente.
+        ultimoInimigo = enemy;
 
         // Só interessa marcar shiny visto; o que alimenta a taxa é a bola.
         const key = `${enemy.id}|${enemy.created_at}`;
@@ -1322,6 +1597,12 @@
         }
 
         if (enemy.is_shiny) {
+            // Confere contra a lista gravada, não só contra o dedupe em
+            // memória: um shiny permanece no mapa entre recarregamentos.
+            if (state.shinySeen.indexOf(key) >= 0) return;
+            state.shinySeen.push(key);
+            if (state.shinySeen.length > SHINY_SEEN_CAP) state.shinySeen.shift();
+
             state.shinyEncounters++;
             const h = state.hunts[chave];
             if (h) h.shinyEncounters++;
@@ -1396,10 +1677,71 @@
             if (src.is_shiny) state.shinyCaptures++;
             if (typeof src.captured_by_name === 'string') {
                 const nome = src.captured_by_name.slice(0, 60);
-                if (state.accountName !== nome) state.accountName = nome;
+                if (state.accountName !== nome) { state.accountName = nome; anunciarConta(); }
             }
+            anunciarCaptura(state.log[0]);
+        } else {
+            registrarPerdido(data, rarity, key);
         }
         return true;
+    }
+
+    // Aviso local de captura, para um script companheiro OPCIONAL (o de
+    // notificação no Discord). É um CustomEvent na própria página: nada sai
+    // do navegador, nenhuma requisição é feita, e sem o companheiro instalado
+    // o evento simplesmente não tem ouvinte. É o que permite manter este
+    // arquivo com zero requisições próprias — a promessa do README continua
+    // valendo ao pé da letra, e o teste que a garante continua intacto.
+    // O conteúdo é o mesmo retrato que já está no registro de capturas, e
+    // veio do jogo: nada aqui é informação nova exposta à página.
+    const EVENTO_CAPTURA = 'pokepixel-raridades:captura';
+    function anunciarCaptura(entrada) {
+        if (!entrada) return;
+        try {
+            W.dispatchEvent(new W.CustomEvent(EVENTO_CAPTURA, {
+                detail: { versao: 1, conta: state.accountName || null, captura: entrada },
+            }));
+        } catch (e) { /* companheiro é opcional; falhar aqui nunca pode parar a contagem */ }
+    }
+
+    // Bola gasta que não capturou. O evento de falha não traz a criatura, só
+    // qualidade e cápsula — o retrato vem do combat.started daquele combate,
+    // que sempre precede a bola. Se o inimigo retido for de outro combate (a
+    // qualidade não bate), grava o que o próprio evento oferece em vez de
+    // inventar um Pokémon errado.
+    function registrarPerdido(data, rarity, ballKeyName) {
+        if (!state) return;
+        const inimigo = ultimoInimigo && markQuality(ultimoInimigo.quality) === rarity
+            ? ultimoInimigo : null;
+        const ivs = inimigo && inimigo.ivs && typeof inimigo.ivs === 'object' ? inimigo.ivs : null;
+        const det = ivs ? IV_STATS.map(([k]) => Math.min(Number(ivs[k]) || 0, IV_STAT_MAX)) : null;
+        const ivEvento = Number(data && (data.iv_total != null ? data.iv_total : data.ivTotal));
+
+        state.perdidos.unshift({
+            sp: String((inimigo && inimigo.species_id) || '').slice(0, 40),
+            nome: String((inimigo && (inimigo.species_name || inimigo.species_id)) || '?').slice(0, 40),
+            q: rarity,
+            // Selvagem vem no nível do mapa — ao contrário das capturas, que
+            // nascem no nível 1. É justamente o que a coluna final mostra.
+            lvl: Number(inimigo && inimigo.level) || 0,
+            iv: Math.min(det ? det.reduce((s, v) => s + v, 0)
+                             : (Number.isFinite(ivEvento) ? ivEvento : 0), IV_MAX),
+            det,
+            mult: Number(inimigo && inimigo.quality_multiplier) || 0,
+            bat: inimigo ? [inimigo.max_hp, inimigo.atk, inimigo.def,
+                            inimigo.spa, inimigo.spd, inimigo.spe].map(v => Number(v) || 0) : null,
+            poder: Number(inimigo && inimigo.power) || 0,
+            nat: String((inimigo && inimigo.nature) || '').slice(0, 20),
+            gen: inimigo && (inimigo.gender === 'male' || inimigo.gender === 'female')
+                ? inimigo.gender : '',
+            bola: ballKeyName,
+            h: huntAtual || '',
+            sold: false,
+            shiny: !!(inimigo && inimigo.is_shiny),
+            at: new Date().toISOString(),
+        });
+
+        if (state.perdidos.length > LOST_CAP) state.perdidos.length = LOST_CAP;
     }
 
     // Guarda o detalhe de cada captura. O evento já traz tudo: IVs, nature,
@@ -1759,14 +2101,15 @@
     .pp-rt-shiny { color: #4fc6ea; font-size: 12px; font-weight: 500; }
 
     .pp-rt-tabs {
-        display: grid; grid-template-columns: 1fr 1fr 1fr;
+        display: grid; grid-template-columns: repeat(4, 1fr);
         gap: 9px; padding: 9px 20px 3px;
     }
     .pp-rt-tab {
         background: #16161a; border: 1px solid #26262e; border-radius: 10px;
-        color: #8b8b95; padding: 9px 13px; cursor: pointer;
+        color: #8b8b95; padding: 9px 10px; cursor: pointer;
         font: 600 12px/1 ui-sans-serif, system-ui, sans-serif;
         letter-spacing: .06em; transition: color .15s, border-color .15s;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
     .pp-rt-tab:hover { color: #c9ced4; }
     .pp-rt-tab.pp-active {
@@ -1777,11 +2120,19 @@
     /* Filtros ficam no HTML fixo e só são exibidos na aba de capturas: se
        fossem recriados a cada render, o campo perderia o foco na digitação. */
     #pp-rt-filters {
-        display: none; grid-template-columns: 1.35fr 1.2fr .72fr .72fr 1fr;
+        display: none; grid-template-columns: 1.15fr 1fr .68fr .68fr .8fr .85fr;
         gap: 8px; padding: 6px 20px 0; align-items: end;
         height: 56px; box-sizing: border-box;
     }
     #pp-rt-filters.pp-on { display: grid; }
+    /* Perdido não tem destino. Especificidade dupla para vencer a grade
+       padrão acima, que tem a mesma especificidade e vem antes. O campo é
+       escondido pelo id, não por posição: com :last-child, acrescentar um
+       filtro no fim esconderia o filtro errado. */
+    #pp-rt-filters.pp-sem-destino.pp-sem-destino {
+        grid-template-columns: 1.35fr 1.15fr .78fr .78fr .95fr;
+    }
+    #pp-rt-filters.pp-sem-destino #pp-rt-field-sold { display: none; }
     .pp-rt-field { display: flex; flex-direction: column; gap: 4px; }
     .pp-rt-field label {
         color: #7a7a86; font-size: 9.5px; letter-spacing: .1em; text-transform: uppercase;
@@ -1918,6 +2269,12 @@
         margin: 0 0 6px; color: #d9b665; font-size: 9.5px;
         letter-spacing: .12em; text-transform: uppercase;
     }
+    /* O título é caixa-alta; o crédito não pode ser, senão "PPTools" vira
+       "PPTOOLS". Escapa do text-transform e do espaçamento do título. */
+    .pp-rt-tip-head .pp-rt-fonte {
+        text-transform: none; letter-spacing: .01em;
+        color: #7a7a86; font-size: 10px; font-weight: 400;
+    }
 
     /* Cada atributo mostra o valor efetivo e o IV que o gerou */
     .pp-rt-bat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 3px 10px; }
@@ -1928,10 +2285,15 @@
     }
     .pp-rt-bat > span { color: #8b8b95; flex: 1; }
     .pp-rt-bat > b { color: #e6e6ea; font-variant-numeric: tabular-nums; }
+    /* O IV por atributo é dado de decisão, não rodapé: em #55555f sobre
+       #16161a ele ficava com contraste ~2,5:1, ilegível de relance. O valor
+       vem claro e seminegrito; só o "/31", que é constante e não informa
+       nada, continua discreto. */
     .pp-rt-bat > i {
-        font-style: normal; color: #55555f; font-size: 10px;
+        font-style: normal; color: #cfcfda; font-size: 10.5px; font-weight: 600;
         font-variant-numeric: tabular-nums;
     }
+    .pp-rt-bat > i .pp-rt-ivmax { color: #6c6c78; font-weight: 400; }
     .pp-rt-neutro { color: #8b8b95 !important; font-weight: 500 !important; }
     .pp-rt-up { color: #54d97c; font-size: 9px; margin-left: 2px; }
     .pp-rt-down { color: #f0736b; font-size: 9px; margin-left: 2px; }
@@ -1944,7 +2306,7 @@
     .pp-rt-stat b { color: #e6e6ea; font-weight: 600; text-align: right; }
     .pp-rt-tip-vazio { color: #55555f; font-size: 11px; margin: 0; }
     .pp-rt-hrow, .pp-rt-row {
-        display: grid; grid-template-columns: 1.4fr .8fr .8fr 1.7fr;
+        display: grid; grid-template-columns: 1.4fr .75fr .75fr .75fr 1.55fr;
         gap: 12px; align-items: center;
     }
     .pp-rt-hrow {
@@ -2038,10 +2400,20 @@
         max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
     #pp-rt-reset:hover { border-color: #6b4a4a; color: #f0a5a5; }
+    /* Botão armado: o segundo clique executa. Especificidade dupla para
+       vencer as regras de #pp-rt-reset e #pp-rt-del, que vêm antes. */
+    .pp-rt-armado.pp-rt-armado {
+        border-color: #d9534f; color: #ffd9d7; background: #3a1f1f;
+        animation: pp-rt-pulsa 1s ease-in-out infinite;
+    }
+    @keyframes pp-rt-pulsa { 50% { border-color: #ff8a85; } }
+    @media (prefers-reduced-motion: reduce) {
+        .pp-rt-armado.pp-rt-armado { animation: none; }
+    }
 
     @media (max-width: 640px) {
         .pp-rt-totals { grid-template-columns: 1fr; }
-        .pp-rt-hrow, .pp-rt-row { grid-template-columns: 1.2fr .6fr .6fr 1.2fr; gap: 8px; }
+        .pp-rt-hrow, .pp-rt-row { grid-template-columns: 1.2fr .55fr .55fr .55fr 1.05fr; gap: 8px; }
         #pp-rt-foot { flex-direction: column; align-items: stretch; }
     }
     @media (prefers-reduced-motion: reduce) {
@@ -2112,6 +2484,7 @@
                     <button class="pp-rt-tab pp-active" type="button" data-view="rarity">Por raridade</button>
                     <button class="pp-rt-tab" type="button" data-view="ball">Por pokébola</button>
                     <button class="pp-rt-tab" type="button" data-view="log">Capturas</button>
+                    <button class="pp-rt-tab" type="button" data-view="lost">Perdidos</button>
                 </div>
                 <div id="pp-rt-filters">
                     <div class="pp-rt-field">
@@ -2131,6 +2504,14 @@
                         <input id="pp-rt-f-ivmax" type="number" min="0" max="186" placeholder="186" />
                     </div>
                     <div class="pp-rt-field">
+                        <label for="pp-rt-f-shiny">Forma</label>
+                        <select id="pp-rt-f-shiny">
+                            <option value="">Todas</option>
+                            <option value="normal">Normal</option>
+                            <option value="shiny">Shiny</option>
+                        </select>
+                    </div>
+                    <div class="pp-rt-field" id="pp-rt-field-sold">
                         <label for="pp-rt-f-sold">Destino</label>
                         <select id="pp-rt-f-sold">
                             <option value="">Todos</option>
@@ -2200,6 +2581,7 @@
             fIvMin: overlay.querySelector('#pp-rt-f-ivmin'),
             fIvMax: overlay.querySelector('#pp-rt-f-ivmax'),
             fSold: overlay.querySelector('#pp-rt-f-sold'),
+            fShiny: overlay.querySelector('#pp-rt-f-shiny'),
             pager: overlay.querySelector('#pp-rt-pager'),
             pagerInfo: overlay.querySelector('#pp-rt-pager-info'),
             prev: overlay.querySelector('#pp-rt-prev'),
@@ -2215,7 +2597,7 @@
         });
 
         // Qualquer mudança de filtro volta para a primeira página
-        [els.fSp, els.fQ, els.fIvMin, els.fIvMax, els.fSold].forEach(el => {
+        [els.fSp, els.fQ, els.fIvMin, els.fIvMax, els.fShiny, els.fSold].forEach(el => {
             el.addEventListener('change', () => { logPage = 0; render(); });
             el.addEventListener('input', () => { logPage = 0; render(); });
         });
@@ -2223,7 +2605,9 @@
         // Delegação: as linhas são recriadas a cada render, então o ouvinte
         // fica no contêiner, que é permanente.
         els.rows.addEventListener('mouseover', ev => {
-            if (view !== 'log') return;
+            // Vale nas duas abas de registro: perdido também tem retrato
+            // completo (veio do combat.started) e merece a mesma análise.
+            if (view !== 'log' && view !== 'lost') return;
             const linha = ev.target.closest && ev.target.closest('.pp-rt-row--log[data-i]');
             if (linha) mostrarTip(linha); else esconderTip();
         });
@@ -2270,6 +2654,40 @@
             renderHunt();
         });
 
+        // Confirmação de ação destrutiva SEM confirm() do navegador.
+        //
+        // O confirm() nativo falha em silêncio: depois de alguns diálogos, o
+        // Chrome oferece "impedir que esta página crie mais diálogos", e quem
+        // marca isso passa a receber false em toda chamada seguinte, para
+        // sempre, sem erro nenhum. O botão simplesmente para de funcionar e
+        // não há o que investigar. Também era intestável — o sandbox do
+        // harness nem tinha confirm, então estes dois botões nunca rodaram em
+        // teste apesar de serem as duas ações que apagam dados.
+        //
+        // A confirmação agora mora no painel: o primeiro clique arma o botão,
+        // o segundo executa. Sai sozinho depois de alguns segundos.
+        const ARMADO_MS = 5000;
+        let armado = null;   // { btn, timer, textoOriginal }
+
+        function desarmar() {
+            if (!armado) return;
+            clearTimeout(armado.timer);
+            armado.btn.classList.remove('pp-rt-armado');
+            armado.btn.textContent = armado.textoOriginal;
+            armado = null;
+        }
+
+        // Devolve true quando a ação está confirmada (segundo clique).
+        function confirmado(btn, aviso) {
+            if (armado && armado.btn === btn) { desarmar(); return true; }
+            desarmar();
+            armado = { btn, textoOriginal: btn.textContent, timer: null };
+            btn.classList.add('pp-rt-armado');
+            btn.textContent = aviso;
+            armado.timer = setTimeout(desarmar, ARMADO_MS);
+            return false;
+        }
+
         // Excluir: subtrai do total igual ao zerar, mas remove o perfil em vez
         // de recriá-lo vazio. Sem a subtração o total guardaria números que não
         // aparecem em perfil nenhum.
@@ -2277,8 +2695,7 @@
             if (!state) return;
             const h = perfilAtivo && state.hunts[perfilAtivo];
             if (!h) return;
-            if (!confirm(`Excluir o perfil da hunt ${h.nome}? `
-                + 'Os números dela saem do total e o perfil some da lista. As outras hunts não são afetadas.')) return;
+            if (!confirmado(els.del, 'Confirmar exclusão?')) return;
 
             for (const k of RARITY_KEYS) {
                 state.attempts[k] = Math.max(0, state.attempts[k] - h.attempts[k]);
@@ -2293,6 +2710,7 @@
             state.shinyEncounters = Math.max(0, state.shinyEncounters - h.shinyEncounters);
             state.shinyCaptures = Math.max(0, state.shinyCaptures - h.shinyCaptures);
             state.log = state.log.filter(e => e.h !== perfilAtivo);
+            state.perdidos = state.perdidos.filter(e => e.h !== perfilAtivo);
 
             delete state.hunts[perfilAtivo];
             if (huntKey === perfilAtivo) { huntKey = null; hunt = null; }
@@ -2309,8 +2727,7 @@
             const h = perfilAtivo && state.hunts[perfilAtivo];
 
             if (h) {
-                if (!confirm(`Zerar os contadores da hunt ${h.nome}? `
-                    + 'Esses números também saem do total, e as outras hunts não são afetadas.')) return;
+                if (!confirmado(els.reset, `Zerar ${h.nome}?`)) return;
 
                 // Subtrai do total o que pertencia a esta hunt: sem isso, o
                 // total guardaria números que você não vê em lugar nenhum.
@@ -2327,14 +2744,13 @@
                 state.shinyEncounters = Math.max(0, state.shinyEncounters - h.shinyEncounters);
                 state.shinyCaptures = Math.max(0, state.shinyCaptures - h.shinyCaptures);
                 state.log = state.log.filter(e => e.h !== perfilAtivo);
+                state.perdidos = state.perdidos.filter(e => e.h !== perfilAtivo);
 
                 const zerada = novaHunt(h.nome, h.sp, h.map);
                 zerada.ultimo = h.ultimo;
                 state.hunts[perfilAtivo] = zerada;
             } else {
-                const quem = state.accountName ? `da conta ${state.accountName}` : 'desta conta';
-                if (!confirm(`Zerar TODOS os contadores ${quem}, incluindo todas as hunts? `
-                    + 'A outra aba não é afetada, e seu progresso no jogo também não.')) return;
+                if (!confirmado(els.reset, 'Zerar TUDO? Confirmar')) return;
                 const name = state.accountName;
                 state = defaultState();
                 state.accountName = name;
@@ -2585,10 +3001,10 @@
         return (sp && sp.name) || prettify(id || '?');
     }
 
-    function atualizarFiltroEspecie() {
+    function atualizarFiltroEspecie(lista) {
         if (!els.fSp || !state) return;
         const vistos = new Set();
-        for (const e of state.log) {
+        for (const e of (lista || state.log)) {
             if (perfilAtivo && e.h !== perfilAtivo) continue;
             if (e.sp) vistos.add(e.sp);
         }
@@ -2609,32 +3025,36 @@
         els.fSp.value = ids.indexOf(anterior) >= 0 ? anterior : '';
     }
 
-    function renderLog() {
+    function renderLog(perdidos) {
+        const lista0 = perdidos ? state.perdidos : state.log;
+        const teto = perdidos ? LOST_CAP : LOG_CAP;
         els.hrow.style.display = '';
         els.hrow.classList.add('pp-rt-hrow--log');
         els.hrow.innerHTML = '<div>Pokémon</div><div>Raridade</div><div>IV</div>'
             + '<div>Natureza</div><div>Gênero</div><div>Pokébola</div>'
-            + '<div style="text-align:right">Destino</div>';
+            + `<div style="text-align:right">${perdidos ? 'Nível' : 'Destino'}</div>`;
         esconderTip();
 
         // Filtros lidos na hora; os campos vivem no HTML fixo justamente para
         // não perderem o foco a cada redesenho.
         // O filtro de espécie é preenchido com o que existe no perfil ativo,
         // então ele acompanha a hunt selecionada em vez de listar as 251.
-        atualizarFiltroEspecie();
+        atualizarFiltroEspecie(lista0);
         const fsp = els.fSp.value;
         const fq = els.fQ.value;
         const min = els.fIvMin.value === '' ? 0 : Number(els.fIvMin.value);
         const max = els.fIvMax.value === '' ? IV_MAX : Number(els.fIvMax.value);
         const fs = els.fSold.value;
+        const fsh = els.fShiny.value;
 
-        const lista = state.log.filter(e =>
+        const lista = lista0.filter(e =>
             (!perfilAtivo || e.h === perfilAtivo)
             && (!fsp || e.sp === fsp)
             && (!fq || e.q === fq)
             && e.iv >= (Number.isFinite(min) ? min : 0)
             && e.iv <= (Number.isFinite(max) ? max : IV_MAX)
-            && (!fs || (fs === 'sold' ? e.sold : !e.sold)));
+            && (!fsh || (fsh === 'shiny' ? e.shiny : !e.shiny))
+            && (perdidos || !fs || (fs === 'sold' ? e.sold : !e.sold)));
 
         const paginas = Math.max(1, Math.ceil(lista.length / LOG_PAGE));
         if (logPage > paginas - 1) logPage = paginas - 1;
@@ -2642,9 +3062,9 @@
         const pagina = lista.slice(inicio, inicio + LOG_PAGE);
 
         if (!lista.length) {
-            els.rows.innerHTML = `<div class="pp-rt-empty">${state.log.length
-                ? 'Nenhuma captura corresponde aos filtros.'
-                : 'Nenhuma captura registrada ainda.'}</div>`;
+            els.rows.innerHTML = `<div class="pp-rt-empty">${lista0.length
+                ? `Nenhum${perdidos ? ' perdido' : 'a captura'} corresponde aos filtros.`
+                : `Nenhum${perdidos ? ' perdido registrado' : 'a captura registrada'} ainda.`}</div>`;
         } else {
             paginaAtual = pagina;
             els.rows.innerHTML = pagina.map((e, i) => {
@@ -2673,8 +3093,8 @@
                     <span class="pp-rt-cap-bola">
                         ${bola ? iconeBola(bola) : ''}${escapeHtml(bola ? bola.label : e.bola)}
                     </span>
-                    <span class="pp-rt-cap-dest" style="color:${e.sold ? '#8b8b95' : '#54d97c'}">
-                        ${e.sold ? 'Vendido' : 'Guardado'}
+                    <span class="pp-rt-cap-dest" style="color:${perdidos ? '#8b8b95' : (e.sold ? '#8b8b95' : '#54d97c')}">
+                        ${perdidos ? (e.lvl ? 'Nv. ' + fmt(e.lvl) : '—') : (e.sold ? 'Vendido' : 'Guardado')}
                     </span>
                 </div>`;
             }).join('')
@@ -2682,7 +3102,8 @@
                 .repeat(Math.max(0, LOG_PAGE - pagina.length));
         }
 
-        const limite = `mostra as últimas ${fmt(LOG_CAP)} capturas`;
+        const limite = `mostra ${perdidos ? 'os últimos' : 'as últimas'} ${fmt(teto)} `
+            + (perdidos ? 'perdidos' : 'capturas');
         els.pagerInfo.textContent = lista.length
             ? `${fmt(inicio + 1)}–${fmt(inicio + pagina.length)} de ${fmt(lista.length)} · ${limite}`
             : limite.charAt(0).toUpperCase() + limite.slice(1);
@@ -2719,12 +3140,19 @@
      * cada golpe é físico ou especial, com power e cooldown_ms. O
      * atributo ofensivo que a espécie não usa vale zero — 31 de Atq.
      * Especial num Machamp não ajuda em nada.
+     *
+     * Natureza e gênero ENTRAM na nota, seguindo o cálculo do PPTools
+     * (qualificadora de Pokémon, fórmula cedida pelo autor): o piso e o
+     * teto de cada tier buscam a pior e a melhor combinação possível de
+     * natureza/gênero, não só o pior/melhor par qualidade+IV — ver
+     * pisoNota()/tetoNota(). Isso NÃO usa o peso de perfil de ataque da
+     * espécie (fis/esp) — esse continua só nas recomendações do cartão
+     * (tetoDe()) e no texto de explicar().
      * ------------------------------------------------------------- */
     const QUAL_EXP = 1.15;
     const SHINY_STAT = Math.pow(1.15, 1.15);
     const NIVEL_REF = 100;      // capturas nascem nível 1; a nota projeta
     const ORDEM = ['hp', 'atk', 'def', 'spa', 'spd', 'spe'];
-    const TIER_ORDEM = ['weak', 'common', 'uncommon', 'rare', 'epic', 'legendary', 'mythical'];
 
     function pesosDe(sp) {
         const b = sp && sp.base;
@@ -2789,9 +3217,8 @@
 
 
     // Pares (sobe, desce) de todas as naturezas, sem repetição.
-    // Pares DISTINTOS de natureza (sobe, desce), usados na busca do teto de
-    // referência que alimenta as recomendações do cartão. A nota em si não
-    // depende de natureza — ver notaCrua().
+    // Pares DISTINTOS de natureza (sobe, desce), usados na busca do piso e do
+    // teto da nota (pisoNota()/tetoNota()) e na recomendação do cartão (tetoDe()).
     const PARES_NAT = (() => {
         const vistos = new Set(), out = [[null, null]];
         for (const v of Object.values(NATUREZAS)) {
@@ -2842,37 +3269,90 @@
         return melhor;
     }
 
-    /* NOTA — só qualidade e IV, por decisão de balanceamento.
-     *
-     * No nível de referência 100, o atributo é floor(2×base + IV + 5), então a
-     * SOMA dos seis não depende de como o IV foi distribuído: cada ponto vale
-     * o mesmo em qualquer atributo. Por isso a nota sai fechada:
-     *
-     *     nota = (2 × soma dos base + IV total + 30) × multiplicador^1,15
-     *
-     * Natureza e gênero ficam FORA da nota — eles entram no cartão apenas como
-     * recomendação. Incluí-los fazia um Pokémon com genética favorável saturar
-     * a escala e marcar 100% sem estar no máximo de qualidade nem de IV.
-     */
-    function notaCrua(base, ivTotal, mult, shiny) {
-        let soma = 30;                       // os "+5" dos seis atributos
-        for (const k of ORDEM) soma += 2 * base[k];
-        soma += ivTotal;
-        let v = soma * Math.pow(mult, QUAL_EXP);
-        if (shiny) v *= SHINY_STAT;
-        return v;
+    // Distribui o orçamento de IV priorizando os atributos de MENOR margem —
+    // espelho de alocarOtimo(), usado para achar o pior roll possível de um
+    // tier (o excedente de IV desperdiçado onde menos rende).
+    function alocarPior(margem, total) {
+        const ivs = {}; for (const k of ORDEM) ivs[k] = 1;
+        let resta = Math.max(0, total - 6);
+        for (const k of [...ORDEM].sort((a, b) => margem[a] - margem[b])) {
+            const d = Math.min(IV_STAT_MAX - 1, resta); ivs[k] += d; resta -= d;
+            if (!resta) break;
+        }
+        return ivs;
     }
 
-    // Extremos de um tier: a pior e a melhor rolagem possíveis nele.
+    // Soma dos seis atributos SEM peso de perfil de ataque da espécie — cada
+    // atributo pesa o mesmo, igual à nota de antes. A diferença para a versão
+    // anterior é só que natureza e gênero agora entram no cálculo de cada
+    // atributo (via attr()), como no PPTools.
+    function somaSimples(base, ivs, natSobe, natDesce, gen, mult, shiny) {
+        let t = 0;
+        for (const k of ORDEM) t += attr(base[k], ivs[k], natSobe, natDesce, gen, mult, shiny, k);
+        return t;
+    }
+
+    // Quanto cada atributo vale para efeito de nature/gênero, sem peso de
+    // espécie — usado só para decidir ONDE alocar o IV extra ao buscar o
+    // piso/teto da nota (o excedente rende mais no atributo que a natureza
+    // ou o gênero favorecem).
+    function margemNota(sobe, desce, gen) {
+        const m = {};
+        for (const k of ORDEM) {
+            let v = 1;
+            if (k === sobe) v *= 1.1;
+            if (k === desce) v *= 0.9;
+            if (gen === 'male' && (k === 'atk' || k === 'spa')) v *= 1.1;
+            if (gen === 'female' && k === 'hp') v *= 1.1;
+            m[k] = v;
+        }
+        return m;
+    }
+
+    // Melhor e pior valor de nota possíveis num tier, buscando entre todas as
+    // combinações de natureza e gênero (e a alocação de IV mais favorável ou
+    // desfavorável para cada uma) — sem peso de espécie, igual à nota.
+    function tetoNota(base, tier, shiny) {
+        const banda = faixaDe(tier, shiny);
+        const ivB = faixas.iv[tier];
+        if (!banda || !ivB) return null;
+        let melhor = null;
+        for (const [sobe, desce] of PARES_NAT) {
+            for (const gen of ['male', 'female']) {
+                const ivs = alocarOtimo(margemNota(sobe, desce, gen), ivB.max);
+                const val = somaSimples(base, ivs, sobe, desce, gen, banda.max, shiny);
+                if (melhor == null || val > melhor) melhor = val;
+            }
+        }
+        return melhor;
+    }
+
+    function pisoNota(base, tier, shiny) {
+        const banda = faixaDe(tier, shiny);
+        const ivB = faixas.iv[tier];
+        if (!banda || !ivB) return null;
+        let pior = null;
+        for (const [sobe, desce] of PARES_NAT) {
+            for (const gen of ['male', 'female']) {
+                const ivs = alocarPior(margemNota(sobe, desce, gen), ivB.min);
+                const val = somaSimples(base, ivs, sobe, desce, gen, banda.min, shiny);
+                if (pior == null || val < pior) pior = val;
+            }
+        }
+        return pior;
+    }
+
+    // Extremos de um tier: a pior e a melhor nota possíveis nele, já
+    // considerando a melhor/pior natureza e gênero (não só qualidade e IV —
+    // ver comentário do ANALISADOR acima).
     function extremosDoTier(base, tier, shiny) {
         const banda = faixaDe(tier, shiny);
         const ivB = faixas.iv[tier];
         if (!banda || !ivB) return null;
-        return {
-            piso: notaCrua(base, ivB.min, banda.min, shiny),
-            teto: notaCrua(base, ivB.max, banda.max, shiny),
-            ivMin: ivB.min, ivMax: ivB.max, multMin: banda.min, multMax: banda.max,
-        };
+        const piso = pisoNota(base, tier, shiny);
+        const teto = tetoNota(base, tier, shiny);
+        if (piso == null || teto == null) return null;
+        return { piso, teto, ivMin: ivB.min, ivMax: ivB.max, multMin: banda.min, multMax: banda.max };
     }
 
     // Menor e maior tier existentes na tabela em uso. A tabela shiny começa na
@@ -2913,7 +3393,7 @@
         const desce = nat ? ORDEM[nat[2]] : null;
         const gen = String(e.gen || '').toLowerCase();
 
-        const atual = notaCrua(base, ivTot, mult, shiny);
+        const atual = somaSimples(base, ivs, sobe, desce, gen, mult, shiny);
         const tTier = extremosDoTier(base, e.q, shiny);
         const tt = tiersDaTabela(shiny);
         if (!tTier || !tt) return null;
@@ -2921,7 +3401,7 @@
         const melhor = extremosDoTier(base, tt.maior, shiny);
         if (!pior || !melhor) return null;
 
-        // Recomendações — não entram na nota, só informam.
+        // Recomendações — mesma busca que já alimenta o teto da nota.
         const ideal = tetoDe(base, w, e.q, shiny);   // busca natureza/gênero ótimos
 
         return {
@@ -2944,7 +3424,7 @@
         const F = A.faixaTier;
         const n2 = x => x.toFixed(2).replace('.', ',');
 
-        // --- os dois insumos da nota, com a faixa inteira à vista ---
+        // --- qualidade e IV, com a faixa inteira à vista (natureza/gênero vêm depois) ---
         out.push(`IV total <b>${A.ivTot}</b> na faixa ${F.ivMin}–${F.ivMax} da ${rot}.`);
         out.push(`Qualidade <b>×${n2(A.mult)}</b> na faixa ×${n2(F.multMin)}–×${n2(F.multMax)}.`);
 
@@ -3056,7 +3536,7 @@
         const arcoEsp = RARITIES.map(x => x.color);
         const alvo = A.shiny ? 'shinies da espécie' : 'toda a espécie';
         return `<div class="pp-rt-tip-sec pp-rt-an">
-            <p class="pp-rt-tip-head">Análise</p>
+            <p class="pp-rt-tip-head">Análise <span class="pp-rt-fonte">— dados de acordo com o PPTools</span></p>
             <div class="pp-rt-pzs">
                 ${pizza(A.pctTier, arcoTier,
                         'entre as ' + (r.label || '').toLowerCase() + 's' + (A.shiny ? ' shiny' : ''))}
@@ -3071,7 +3551,7 @@
                 ${escapeHtml(((RARITIES.find(x => x.key === A.tierMenor) || {}).label || '').toLowerCase())}
                 à melhor ${escapeHtml(((RARITIES.find(x => x.key === A.tierMaior) || {}).label || '').toLowerCase())}
                 ${escapeHtml(A.shiny ? 'shiny' : '')}.<br>
-                Só qualidade e IV entram na nota.
+                Qualidade, IV, natureza e gênero entram na nota, como no cálculo do PPTools.
             </p>
             <ul class="pp-rt-why">${explicar(A).map(t => `<li>${t}</li>`).join('')}</ul>
         </div>`;
@@ -3093,7 +3573,7 @@
             if (!e.bat) return '';
             const seta = i === sobe ? '<b class="pp-rt-up">▲</b>'
                 : i === desce ? '<b class="pp-rt-down">▼</b>' : '';
-            const iv = e.det ? `${e.det[i]}/${IV_STAT_MAX}` : '—';
+            const iv = e.det ? `${e.det[i]}<span class="pp-rt-ivmax">/${IV_STAT_MAX}</span>` : '—';
             return `<div class="pp-rt-bat">
                 <span>${BAT_STATS[i]}${seta}</span>
                 <b>${fmt(e.bat[i])}</b><i>${iv}</i>
@@ -3252,6 +3732,9 @@
             const o = opts || {};
             const pct = att > 0 ? (cap / att) * 100 : null;
             const width = pct === null ? 0 : Math.min(pct, 100);
+            // Toda tentativa vira captura ou perda: o resumo sai da subtração,
+            // não da lista de perdidos (que tem teto e cobre só as últimas).
+            const perd = Math.max(0, att - cap);
             // Bola do catálogo que nunca foi usada aparece com traços, não com zeros.
             const vazio = o.dashWhenEmpty && att === 0;
             return `
@@ -3261,6 +3744,7 @@
                       text-shadow: 0 0 7px ${color}8c;">${o.icon || ''}${escapeHtml(label)}</span>
                 <div class="pp-rt-num ${att ? '' : 'pp-rt-muted'}">${vazio ? '—' : fmt(att)}</div>
                 <div class="pp-rt-num ${cap ? '' : 'pp-rt-muted'}" style="${cap ? 'color:#54d97c' : ''}">${vazio ? '—' : fmt(cap)}</div>
+                <div class="pp-rt-num ${perd ? '' : 'pp-rt-muted'}" style="${perd ? 'color:#d98080' : ''}">${vazio ? '—' : fmt(perd)}</div>
                 <div class="pp-rt-rate">
                     <div class="pp-rt-bar"><div class="pp-rt-fill" style="width:${width}%;background:${color}"></div></div>
                     <span class="pp-rt-pct ${pct === null ? 'pp-rt-muted' : ''}">
@@ -3283,16 +3767,32 @@
         // O título acompanha a aba ativa.
         els.title.textContent = view === 'ball' ? 'Capturas por pokébola'
             : view === 'log' ? 'Registro de capturas'
+            : view === 'lost' ? 'Registro de perdidos'
             : 'Capturas por raridade';
 
-        // Filtros e paginação só existem na aba de capturas.
-        els.filters.classList.toggle('pp-on', view === 'log');
-        els.pager.classList.toggle('pp-on', view === 'log');
+        // Filtros e paginação existem nas duas abas de registro.
+        const ehRegistro = view === 'log' || view === 'lost';
+        els.filters.classList.toggle('pp-on', ehRegistro);
+        // Perdido não tem destino: o Pokémon fugiu, não foi vendido nem
+        // guardado. O campo some e as quatro colunas restantes se esticam.
+        els.filters.classList.toggle('pp-sem-destino', view === 'lost');
+        els.pager.classList.toggle('pp-on', ehRegistro);
 
-        if (view === 'log') {
-            renderLog();
+        // Cabeçalho das duas abas de contagem. Só o primeiro rótulo muda.
+        // Era reconstruído apenas no ramo da raridade: vindo de Capturas ou
+        // Perdidos, a aba Por pokébola herdava as colunas do registro.
+        const cabecalho = primeira => {
+            els.hrow.style.display = '';
+            els.hrow.classList.remove('pp-rt-hrow--log');
+            els.hrow.innerHTML = `<div id="pp-rt-h1">${primeira}</div><div>Tentativas</div>`
+                + '<div>Capturas</div><div>Perdidos</div><div>Taxa de captura</div>';
+            els.head1 = els.hrow.querySelector('#pp-rt-h1');
+        };
+
+        if (ehRegistro) {
+            renderLog(view === 'lost');
         } else if (view === 'ball') {
-            els.head1.textContent = 'Pokébola';
+            cabecalho('Pokébola');
 
             const vazia = { attempts: 0, captures: 0 };
             const chaves = Object.keys(D.balls);
@@ -3318,11 +3818,7 @@
                 + linhas.join('')
                 + preencher(maxLinhas - linhas.length);
         } else {
-            els.hrow.style.display = '';
-            els.hrow.classList.remove('pp-rt-hrow--log');
-            els.hrow.innerHTML = '<div id="pp-rt-h1">Raridade</div><div>Tentativas</div>'
-                + '<div>Capturas</div><div>Taxa de captura</div>';
-            els.head1 = els.hrow.querySelector('#pp-rt-h1');
+            cabecalho('Raridade');
 
             const sum = key => RARITY_KEYS.reduce((acc, k) => acc + D[key][k], 0);
             const allAtt = sum('attempts');
@@ -3340,10 +3836,14 @@
         if (els.fab.__ppSetTitle) els.fab.__ppSetTitle(state.accountName);
 
         const huntSel = perfilAtivo && state.hunts[perfilAtivo];
-        els.reset.textContent = huntSel ? `Zerar ${huntSel.nome}` : 'Zerar tudo';
+        // Um botão armado não pode ter o texto reescrito: o render roda a cada
+        // evento do jogo, e sobrescrever aqui apagaria o "Confirmar?" no meio
+        // do caminho — o clique seguinte pareceria não fazer nada.
+        const arm = el => el && el.classList.contains('pp-rt-armado');
+        if (!arm(els.reset)) els.reset.textContent = huntSel ? `Zerar ${huntSel.nome}` : 'Zerar tudo';
         if (els.del) {
             els.del.disabled = !huntSel;
-            els.del.textContent = huntSel ? `Excluir ${huntSel.nome}` : 'Excluir perfil';
+            if (!arm(els.del)) els.del.textContent = huntSel ? `Excluir ${huntSel.nome}` : 'Excluir perfil';
             els.del.title = huntSel ? '' : 'Selecione uma hunt para excluir o perfil dela';
         }
 
