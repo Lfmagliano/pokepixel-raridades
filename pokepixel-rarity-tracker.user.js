@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pokepixel — Raridades
 // @namespace    https://pokepixel.nietore.com/
-// @version      7.12.1
+// @version      7.13.0
 // @description  Conta tentativas e capturas por qualidade (Fraca a Mítica) lendo os eventos de captura do jogo.
 // @author       Lfmagliano
 // @homepageURL  https://github.com/Lfmagliano/pokepixel-raridades
@@ -2487,8 +2487,42 @@
         background: #16161a; border: 1px solid #26262e; border-radius: 8px;
         color: #e6e6ea; padding: 7px 9px; font: 400 12px ui-sans-serif, system-ui, sans-serif;
     }
-    .pp-rt-field select:focus-visible, .pp-rt-field input:focus-visible {
+    .pp-rt-field select:focus-visible, .pp-rt-field input:focus-visible,
+    .pp-rt-multi > button:focus-visible {
         outline: 2px solid #d9b665; outline-offset: 1px;
+    }
+
+    /* Filtro de múltipla escolha: botão + painel de caixas. Um <select
+       multiple> nativo vira caixa de lista de altura própria e não caberia
+       na fileira de 56px que os filtros ocupam. */
+    .pp-rt-multi { position: relative; }
+    .pp-rt-multi > button {
+        background: #16161a; border: 1px solid #26262e; border-radius: 8px;
+        color: #e6e6ea; padding: 7px 9px; cursor: pointer; text-align: left;
+        font: 400 12px ui-sans-serif, system-ui, sans-serif;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .pp-rt-multi > button:hover { border-color: #3a3a45; }
+    .pp-rt-multi > button.pp-ativo { border-color: #d9b665; color: #f0dfae; }
+    .pp-rt-pop {
+        display: none; position: absolute; top: 100%; left: 0; z-index: 30;
+        margin-top: 4px; min-width: 100%; max-width: 260px;
+        /* O PAINEL não rola, mas este popup precisa: a lista de espécies
+           acompanha o que existe no perfil e pode passar de dez linhas. */
+        max-height: 232px; overflow-y: auto;
+        background: #101014; border: 1px solid #2f2f38; border-radius: 9px;
+        box-shadow: 0 12px 28px rgba(0,0,0,.6); padding: 5px;
+    }
+    .pp-rt-pop.pp-on { display: block; }
+    .pp-rt-pop label {
+        display: flex; align-items: center; gap: 7px; cursor: pointer;
+        padding: 5px 7px; border-radius: 6px; color: #c6c6d0;
+        font: 400 12px ui-sans-serif, system-ui, sans-serif;
+        letter-spacing: 0; text-transform: none; white-space: nowrap;
+    }
+    .pp-rt-pop label:hover { background: #1b1b21; }
+    .pp-rt-pop .pp-rt-pop-sep {
+        height: 1px; background: #26262e; margin: 4px 2px;
     }
     .pp-rt-iv { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 
@@ -2840,13 +2874,17 @@
                     <button class="pp-rt-tab" type="button" data-view="lost">Perdidos</button>
                 </div>
                 <div id="pp-rt-filters">
-                    <div class="pp-rt-field">
+                    <div class="pp-rt-field pp-rt-multi">
                         <label for="pp-rt-f-sp">Pokémon</label>
-                        <select id="pp-rt-f-sp"><option value="">Todos</option></select>
+                        <button id="pp-rt-f-sp" type="button" aria-haspopup="true"
+                                aria-expanded="false">Todos</button>
+                        <div class="pp-rt-pop" id="pp-rt-pop-sp" role="group"></div>
                     </div>
-                    <div class="pp-rt-field">
+                    <div class="pp-rt-field pp-rt-multi">
                         <label for="pp-rt-f-q">Raridade</label>
-                        <select id="pp-rt-f-q"><option value="">Todas</option></select>
+                        <button id="pp-rt-f-q" type="button" aria-haspopup="true"
+                                aria-expanded="false">Todas</button>
+                        <div class="pp-rt-pop" id="pp-rt-pop-q" role="group"></div>
                     </div>
                     <div class="pp-rt-field">
                         <label for="pp-rt-f-ivmin">IV mínimo</label>
@@ -2933,6 +2971,8 @@
             fQ: overlay.querySelector('#pp-rt-f-q'),
             fIvMin: overlay.querySelector('#pp-rt-f-ivmin'),
             fIvMax: overlay.querySelector('#pp-rt-f-ivmax'),
+            popSp: overlay.querySelector('#pp-rt-pop-sp'),
+            popQ: overlay.querySelector('#pp-rt-pop-q'),
             fSold: overlay.querySelector('#pp-rt-f-sold'),
             fShiny: overlay.querySelector('#pp-rt-f-shiny'),
             pager: overlay.querySelector('#pp-rt-pager'),
@@ -2950,9 +2990,27 @@
         });
 
         // Qualquer mudança de filtro volta para a primeira página
-        [els.fSp, els.fQ, els.fIvMin, els.fIvMax, els.fShiny, els.fSold].forEach(el => {
+        [els.fIvMin, els.fIvMax, els.fShiny, els.fSold].forEach(el => {
             el.addEventListener('change', () => { logPage = 0; render(); });
             el.addEventListener('input', () => { logPage = 0; render(); });
+        });
+
+        // Filtros de múltipla escolha: botão abre o painel, caixa marca.
+        ligarMulti(els.fSp, els.popSp, selSp, 'Todos');
+        ligarMulti(els.fQ, els.popQ, selQ, 'Todas');
+        // Um clique fora fecha os dois. No capture para pegar antes de
+        // qualquer handler que pare a propagação.
+        document.addEventListener('mousedown', ev => {
+            for (const [b2, pop] of [[els.fSp, els.popSp], [els.fQ, els.popQ]]) {
+                if (!pop.classList.contains('pp-on')) continue;
+                if (b2.contains(ev.target) || pop.contains(ev.target)) continue;
+                fecharPop(b2, pop);
+            }
+        }, true);
+        overlay.addEventListener('keydown', ev => {
+            if (ev.key !== 'Escape') return;
+            fecharPop(els.fSp, els.popSp);
+            fecharPop(els.fQ, els.popQ);
         });
 
         // Delegação: as linhas são recriadas a cada render, então o ouvinte
@@ -3354,6 +3412,97 @@
         return (sp && sp.name) || prettify(id || '?');
     }
 
+    /* ---------------------------------------------------------------
+     * FILTROS DE MÚLTIPLA ESCOLHA
+     *
+     * Espécie e raridade aceitam várias marcações ao mesmo tempo. O
+     * conjunto VAZIO quer dizer "todas" — é o que faz o filtro começar
+     * sem esconder nada e evita o estado inútil de zero marcadas, em que
+     * a lista ficaria vazia sem motivo aparente.
+     * ------------------------------------------------------------- */
+    const selSp = new Set();
+    const selQ = new Set();
+
+    function fecharPop(btn, pop) {
+        if (!pop || !pop.classList.contains('pp-on')) return;
+        pop.classList.remove('pp-on');
+        btn.setAttribute('aria-expanded', 'false');
+    }
+
+    function ligarMulti(btn, pop, sel, rotuloTodos) {
+        btn.addEventListener('click', () => {
+            const abrir = !pop.classList.contains('pp-on');
+            // Só um painel aberto por vez.
+            fecharPop(els.fSp, els.popSp);
+            fecharPop(els.fQ, els.popQ);
+            if (!abrir) return;
+            pop.classList.add('pp-on');
+            btn.setAttribute('aria-expanded', 'true');
+        });
+        pop.addEventListener('change', ev => {
+            const cb = ev.target;
+            if (!cb || cb.type !== 'checkbox') return;
+            if (cb.value === '') {          // "Todas": limpa a seleção
+                sel.clear();
+            } else if (cb.checked) {
+                sel.add(cb.value);
+            } else {
+                sel.delete(cb.value);
+            }
+            logPage = 0;
+            render();
+        });
+        btn.__ppRotulo = rotuloTodos;
+    }
+
+    // Texto do botão: o que está marcado, sem obrigar a abrir o painel.
+    function rotuloMulti(btn, sel, nomeDe) {
+        const n = sel.size;
+        btn.classList.toggle('pp-ativo', n > 0);
+        if (!n) { btn.textContent = btn.__ppRotulo || 'Todas'; return; }
+        if (n === 1) { btn.textContent = nomeDe([...sel][0]); return; }
+        btn.textContent = `${n} selecionadas`;
+    }
+
+    // Redesenha as caixas de um painel preservando o que está marcado.
+    function montarCaixas(pop, itens, sel) {
+        const assinatura = itens.map(i => i.v).join('|');
+        if (pop.__ppSig !== assinatura) {
+            pop.__ppSig = assinatura;
+            pop.innerHTML = '';
+            const todos = document.createElement('label');
+            todos.innerHTML = '<input type="checkbox" value="">'
+                + `<span>${escapeHtml(pop === els.popQ ? 'Todas' : 'Todos')}</span>`;
+            pop.appendChild(todos);
+            const sep = document.createElement('div');
+            sep.className = 'pp-rt-pop-sep';
+            pop.appendChild(sep);
+            for (const it of itens) {
+                const l = document.createElement('label');
+                const cb = document.createElement('input');
+                cb.type = 'checkbox';
+                cb.value = it.v;
+                const sp2 = document.createElement('span');
+                sp2.textContent = it.nome;
+                if (it.cor) sp2.style.color = it.cor;
+                l.appendChild(cb);
+                l.appendChild(sp2);
+                pop.appendChild(l);
+            }
+        }
+        // Marcações refletem o estado atual, inclusive depois de redesenhar.
+        for (const cb of pop.querySelectorAll('input[type=checkbox]')) {
+            cb.checked = cb.value === '' ? sel.size === 0 : sel.has(cb.value);
+        }
+    }
+
+    function atualizarFiltroRaridade() {
+        if (!els.popQ) return;
+        montarCaixas(els.popQ,
+            RARITIES.map(r => ({ v: r.key, nome: r.label, cor: r.color })), selQ);
+        rotuloMulti(els.fQ, selQ, k => (RARITIES.find(r => r.key === k) || {}).label || k);
+    }
+
     function atualizarFiltroEspecie(lista) {
         if (!els.fSp || !state) return;
         const vistos = new Set();
@@ -3362,20 +3511,11 @@
             if (e.sp) vistos.add(e.sp);
         }
         const ids = [...vistos].sort((a, b) => nomeEspecie(a).localeCompare(nomeEspecie(b), 'pt-BR'));
-        const assinatura = ids.join('|');
-        if (els.fSp.__ppSig === assinatura) return;
-        els.fSp.__ppSig = assinatura;
-
-        const anterior = els.fSp.value;
-        els.fSp.innerHTML = '<option value="">Todos</option>';
-        for (const id of ids) {
-            const opt = document.createElement('option');
-            opt.value = id;
-            opt.textContent = nomeEspecie(id);
-            els.fSp.appendChild(opt);
-        }
-        // Mantém a escolha se a espécie ainda existe na lista.
-        els.fSp.value = ids.indexOf(anterior) >= 0 ? anterior : '';
+        // Espécie que saiu da lista sai da seleção junto, senão o filtro
+        // esconderia tudo por causa de uma escolha invisível.
+        for (const id of [...selSp]) if (ids.indexOf(id) < 0) selSp.delete(id);
+        montarCaixas(els.popSp, ids.map(id => ({ v: id, nome: nomeEspecie(id) })), selSp);
+        rotuloMulti(els.fSp, selSp, nomeEspecie);
     }
 
     function renderLog(perdidos) {
@@ -3393,8 +3533,8 @@
         // O filtro de espécie é preenchido com o que existe no perfil ativo,
         // então ele acompanha a hunt selecionada em vez de listar as 251.
         atualizarFiltroEspecie(lista0);
-        const fsp = els.fSp.value;
-        const fq = els.fQ.value;
+        // Conjunto vazio = todas.
+        atualizarFiltroRaridade();
         const min = els.fIvMin.value === '' ? 0 : Number(els.fIvMin.value);
         const max = els.fIvMax.value === '' ? IV_MAX : Number(els.fIvMax.value);
         const fs = els.fSold.value;
@@ -3402,8 +3542,8 @@
 
         const lista = lista0.filter(e =>
             (!perfilAtivo || e.h === perfilAtivo)
-            && (!fsp || e.sp === fsp)
-            && (!fq || e.q === fq)
+            && (!selSp.size || selSp.has(e.sp))
+            && (!selQ.size || selQ.has(e.q))
             && e.iv >= (Number.isFinite(min) ? min : 0)
             && e.iv <= (Number.isFinite(max) ? max : IV_MAX)
             && (!fsh || (fsh === 'shiny' ? e.shiny : !e.shiny))
