@@ -106,6 +106,8 @@ const sandbox = {
     GM_getValue: (k, d) => (store.has(k) ? store.get(k) : d),
     GM_setClipboard: t => { clipboard = t; },
     GM_registerMenuCommand: (nome, fn) => { menu.push([nome, fn]); },
+    // O script lê a versão daqui para mostrá-la no painel.
+    GM_info: { script: { version: (code.match(/@version\s+(\S+)/) || [, '?'])[1] } },
     alert: msg => { alerts.push(String(msg)); },
     // O sandbox não tinha confirm, então os botões de zerar e excluir nunca
     // rodaram em teste: a chamada lançava ReferenceError e o handler morria
@@ -317,7 +319,7 @@ t('script carrega sem lançar', !erroCarga, erroCarga && erroCarga.message);
             !/ppDump|raioX|capturarTela|registrarSlotMiss|GM_registerMenuCommand|GM_setClipboard|TEMPOR/.test(code));
         t('auto-update religado', /@downloadURL\s+https:\/\/raw\.githubusercontent/.test(code)
             && /@updateURL\s+https:\/\/raw\.githubusercontent/.test(code));
-        t('versão 7.8.2 sem sufixo debug', /\/\/ @version\s+7\.8\.2\s*$/m.test(code));
+        t('versão 7.12.1 sem sufixo debug', /\/\/ @version\s+7\.12\.1\s*$/m.test(code));
         t('o principal anuncia a captura sem fazer requisição',
             /const EVENTO_CAPTURA = 'pokepixel-raridades:captura';/.test(code)
             && /W\.dispatchEvent\(new W\.CustomEvent\(EVENTO_CAPTURA/.test(code)
@@ -356,10 +358,11 @@ t('script carrega sem lançar', !erroCarga, erroCarga && erroCarga.message);
             && /const url = \(conta && mapa\[conta\]\) \|\| mapa\[PADRAO\] \|\| '';/.test(corpoD));
         t('o destino viaja na fila (duas contas não trocam de canal)',
             !!codeD && /fila\.push\(\{ corpo, url: webhookDe\(conta\) \}\);/.test(corpoD));
-        t('o companheiro se configura pelo menu, sem console',
-            !!codeD && (corpoD.match(/GM_registerMenuCommand\(/g) || []).length >= 4);
-        t('o companheiro não mostra o token do webhook por inteiro',
-            !!codeD && /\$1…/.test(corpoD));
+        t('o companheiro se configura por interface, sem console',
+            !!codeD && /GM_registerMenuCommand\('Aviso Discord: configurar', abrirUi\)/.test(corpoD));
+        t('o webhook não fica à mostra na tela por padrão',
+            !!codeD && /id="ppd-hook" type="password"/.test(corpoD)
+            && /id="ppd-hook-padrao" type="password"/.test(corpoD));
         t('continua sem requisição própria', !/\bfetch\s*\(/.test(code.replace(/W\.fetch|origFetch|window\.fetch/g,''))
             && !/XMLHttpRequest/.test(code) && !/\.send\(/.test(code));
         t('criaturas do WebSocket são indexadas (oferta do outro jogador)',
@@ -396,10 +399,55 @@ t('script carrega sem lançar', !erroCarga, erroCarga && erroCarga.message);
             && /cabecalho\('Pokébola'\)/.test(code) && /cabecalho\('Raridade'\)/.test(code));
         t('análise vale nas duas abas de registro',
             /if \(view !== 'log' && view !== 'lost'\) return;/.test(code));
-        t('perdidos têm teto de 500 e são gravados como as capturas',
+        t('a chance usa a fórmula da wiki, não só a base da espécie',
+            /const CAP_DIFICULDADE = 0\.3;/.test(code)
+            && /const CAP_ESCALA_NIVEL = 0\.012;/.test(code)
+            && /const penNivel = 1 \/ \(1 \+ nivel \* CAP_ESCALA_NIVEL\);/.test(code)
+            && /base \* bola \* penNivel \* CAP_DIFICULDADE \* penQual/.test(code));
+        t('a penalidade por qualidade bate com a tabela do jogo',
+            /weak: 1, common: 1, uncommon: 0\.95, rare: 0\.6,/.test(code)
+            && /epic: 0\.09, legendary: 0\.009, mythical: 0\.0009,/.test(code));
+        t('cada cápsula tem seu multiplicador',
+            /poke: 1, great: 2, super: 3, ultra: 4, pixel: 5,/.test(code)
+            && /\[\/master\/i, 255\]/.test(code));
+        t('shiny e o piso do jogo entram na conta',
+            /const CAP_MULT_SHINY = 0\.00001;/.test(code)
+            && /const CAP_PISO = 0\.01;/.test(code)
+            && /\* \(e\.shiny \? CAP_MULT_SHINY : 1\);/.test(code)
+            && /Math\.min\(CAP_TETO, Math\.max\(CAP_PISO, pct\)\)/.test(code));
+        t('falta de peça vira traço, não produto pela metade',
+            /if \(bola === null\) return null;/.test(code)
+            && /if \(!\(nivel > 0\)\) return null;/.test(code)
+            && /if \(penQual === undefined\) return null;/.test(code));
+        t('o nível do selvagem é gravado também na captura',
+            /lvlSel: Number\(ultimoInimigo && ultimoInimigo\.level\) \|\| 0,/.test(code)
+            && /lvlSel: safeCount\(e\.lvlSel\),/.test(code));
+        t('a chance vira COLUNA na linha, não seção do cartão',
+            /<div>Pokébola<\/div><div>Chance<\/div>/.test(code)
+            && /<span class="pp-rt-cap-chance">/.test(code)
+            && !/function chanceHtml/.test(code));
+        t('a coluna Chance não ganhou filtro',
+            !/pp-rt-f-chance/.test(code)
+            && (code.match(/id="pp-rt-f-/g) || []).length === 6);
+        t('a grade das linhas foi para oito colunas',
+            /grid-template-columns: 1\.45fr \.82fr \.68fr \.82fr \.85fr \.92fr \.7fr \.78fr;/.test(code));
+        t('espécie sem dado mostra traço, não zero',
+            /if \(ch === null\) return '<i>—<\/i>';/.test(code));
+        t('mítica não vira 0,00% por falta de casas decimais',
+            /const casas = ch >= 1 \? 2 : ch >= 0\.01 \? 3 : 5;/.test(code)
+            && /String\(Number\(ch\.toFixed\(casas\)\)\)/.test(code));
+        t('lendário, mítico e shiny não disputam vaga com os comuns',
+            /const LOST_KEEP = 1000;/.test(code)
+            && /const perdidoNotavel = e => !!e && \(e\.shiny \|\| e\.q === 'legendary' \|\| e\.q === 'mythical'\);/.test(code)
+            && /if \(perdidoNotavel\(e\)\) \{ if \(notaveis\+\+ < LOST_KEEP\) out\.push\(e\); \}/.test(code)
+            && /else if \(comuns\+\+ < LOST_CAP\) out\.push\(e\);/.test(code));
+        t('a poda também vale ao carregar o estado gravado',
+            /limpo\.perdidos = podarPerdidos\(/.test(code)
+            && /\.slice\(0, LOST_CAP \+ LOST_KEEP\)/.test(code));
+        t('perdidos comuns têm teto de 500 e são gravados como as capturas',
             /const LOST_CAP = 500;/.test(code)
-            && /state\.perdidos\.length > LOST_CAP/.test(code)
-            && /limpo\.perdidos = limparLista\(value\.perdidos, LOST_CAP\);/.test(code));
+            && /state\.perdidos = podarPerdidos\(state\.perdidos\);/.test(code)
+            && /limpo\.log = limparLista\(value\.log, LOG_CAP\);/.test(code));
         t('capturas e perdidos usam a MESMA sanitização (não podem divergir)',
             (code.match(/const limparEntrada = e => \(\{/g) || []).length === 1
             && /limpo\.log = limparLista\(value\.log, LOG_CAP\);/.test(code));
@@ -473,6 +521,11 @@ t('script carrega sem lançar', !erroCarga, erroCarga && erroCarga.message);
             /if \(perfilAtivo && e\.h !== perfilAtivo\) continue;/.test(code));
         t('select de espécie não é reconstruído à toa (não perde a seleção)',
             /els\.fSp\.__ppSig === assinatura/.test(code));
+        t('a versão aparece no painel, para dar para conferir sem sair do jogo',
+            /const VERSAO = \(\(\) => \{/.test(code)
+            && /GM_info\.script\.version/.test(code)
+            && /` · v\$\{VERSAO\}`/.test(code)
+            && /@grant\s+GM_info/.test(code));
         t('a grade de filtros ganhou a sexta coluna',
             /grid-template-columns: 1\.15fr 1fr \.68fr \.68fr \.8fr \.85fr/.test(code));
         t('reconcilia por incremento, não por total',
@@ -866,9 +919,14 @@ t('script carrega sem lançar', !erroCarga, erroCarga && erroCarga.message);
     const INIMIGO = {
         id: 'wild-1', created_at: '2026-08-21T10:00:00Z', species_id: 'machamp',
         species_name: 'Machamp', map_id: 42, level: 150, quality: 'epic',
-        quality_multiplier: 1.4812, is_shiny: false, nature: 'adamant', gender: 'male',
+        quality_multiplier: 1.48, is_shiny: false, nature: 'adamant', gender: 'male',
         ivs: { hp: 20, atk: 31, def: 18, spa: 4, spd: 22, spe: 15 },
-        max_hp: 4001, atk: 1502, def: 900, spa: 400, spd: 880, spe: 770, power: 8000,
+        // Atributos COERENTES com a fórmula do jogo para estes base stats, IVs,
+        // multiplicador, natureza e gênero no nível 150 — gerados pela fórmula,
+        // não inventados. Sem isso o verificador da projeção recusa (e recusar
+        // é o comportamento certo para dado que não fecha).
+        // Sem "power": o combat.started real não traz esse campo.
+        max_hp: 2166, atk: 837, def: 427, spa: 320, spd: 460, spe: 301,
     };
     // Um shiny e um normal: a linha do shiny tem que usar o sprite shiny, e o
     // filtro de forma tem que separar os dois.
@@ -880,6 +938,7 @@ t('script carrega sem lançar', !erroCarga, erroCarga && erroCarga.message);
     disparar({ type: 'capture.failed', seq: 5002,
                data: { quality: 'epic', capsule_item_id: 'ultra-ball', capsule_name: 'Ultra Bola' } });
 
+    let contadorSeq = 0;
     const abaLost = win.document.querySelector('.pp-rt-tab[data-view="lost"]');
     t('existe uma quarta aba Perdidos', !!abaLost && /Perdidos/.test(abaLost.textContent));
     t('as quatro abas cabem numa fileira só',
@@ -892,6 +951,59 @@ t('script carrega sem lançar', !erroCarga, erroCarga && erroCarga.message);
         t('a linha traz o retrato completo, vindo do combat.started',
             /Machamp/.test(txt) && /110/.test(txt) && /adamant/i.test(txt) && /Ultra Ball/.test(txt),
             txt);
+        // O inimigo do combat.started não traz campo de poder; a soma dos seis
+        // atributos é o que o próprio jogo exibe como PODER TOTAL.
+        t('perdido é projetado para o nível de captura, não o do mapa', (() => {
+            const l = [...win.document.querySelectorAll('#pp-rt-rows .pp-rt-row--log[data-i]')];
+            if (!l.length) return false;
+            l[0].dispatchEvent(new win.MouseEvent('mouseover', { bubbles: true }));
+            const tip = win.document.querySelector('#pp-rt-tip, .pp-rt-tip');
+            const m = tip && /Poder total\s*([\d.,]+)/.exec(tip.textContent);
+            if (!m) return false;
+            const v = Number(m[1].replace(/[.,]/g, ''));
+            // No nível 150 os seis somam 4.511; projetados para o nível 1,
+            // somam 110 (sem capturas no registro, o fator de treinador é 1).
+            return v === 110;
+        })(), 'projetado deve ser dezenas, não milhares');
+        t('a projeção é MEDIDA dos atributos, não reconstruída do multiplicador',
+            /function fatorMedido\(e, sp, f\)/.test(code)
+            && /amostras\.push\(\{ k, v: obs \/ cru \}\);/.test(code)
+            // QUAL_EXP só pode aparecer na estimativa do treinador, nunca na
+            // medição do fator do próprio selvagem.
+            && !/QUAL_EXP/.test(code.slice(code.indexOf('function fatoresDe'),
+                                          code.indexOf('let treinadorCache'))));
+        t('o bônus de treinador volta a entrar, medido das capturas',
+            /function fatorTreinador\(\)/.test(code)
+            && /const fator = r\.fator \* fatorTreinador\(\);/.test(code)
+            && /1 \+ Math\.max\(0, Math\.round\(\(med - 1\) \/ 0\.02\)\) \* 0\.02/.test(code));
+        t('sem capturas suficientes, não corrige em vez de corrigir errado',
+            /if \(amostras\.length < 12\) return \(treinadorCache = 1\);/.test(code));
+        t('a estimativa do treinador é refeita a cada captura nova',
+            /treinadorCache = null;\n            anunciarCaptura/.test(code));
+        t('o HP fica fora da medição (selvagem tem bônus de combate)',
+            /const semHp = ORDEM\.filter\(k => k !== 'hp'\);/.test(code)
+            && /for \(const k of semHp\) \{/.test(code));
+        // ORDEM é declarado bem depois no arquivo; uma const no topo lendo ele
+        // lança ReferenceError na carga e a extensão nem sobe.
+        t('semHp é filtrado dentro da função, não numa const no topo (TDZ)',
+            /\n        const semHp = ORDEM\.filter/.test(code)
+            && !/\n    const SEM_HP/.test(code));
+        t('os cinco atributos restantes têm que concordar',
+            /if \(pior > 0\.06\) \{/.test(code)
+            && /return \{ fator: mediana \};/.test(code));
+        t('projeção recusada diz o MOTIVO na tela, não só que falhou',
+            /const semProjetar = /.test(code)
+            && /sem projeção: \$\{escapeHtml\(motivoProjecao/.test(code)
+            && /fatores não conferem \(/.test(code)
+            && /espécie "\$\{e\.sp \|\| '\?'\}" não está no índice/.test(code)
+            && /base stats da espécie não carregados/.test(code));
+        t('a grade de atributos usa os mesmos valores do poder total',
+            /const batExibido = batDe\(e\);/.test(code)
+            && /<b>\$\{fmt\(batExibido\[i\]\)\}<\/b>/.test(code)
+            && !/<b>\$\{fmt\(e\.bat\[i\]\)\}<\/b>/.test(code));
+        t('a projeção é rotulada no cartão',
+            /como seriam capturado \(Nv\. 1\)/.test(code));
+
         t('perdido mostra o nível do selvagem, não destino de venda',
             /Nv\. 150/.test(txt) && !/Vendido|Guardado/.test(txt), txt);
         t('o cabeçalho troca Destino por Nível',
@@ -924,6 +1036,24 @@ t('script carrega sem lançar', !erroCarga, erroCarga && erroCarga.message);
             t('filtro Todas devolve os dois', src().length === 2);
         }
 
+        // HP inflado NÃO pode derrubar a projeção: no jogo real o selvagem vem
+        // com ~25% mais HP que a fórmula prevê, e os outros cinco batem.
+        t('HP inflado do selvagem não derruba a projeção', (() => {
+            const antes = INIMIGO.max_hp;
+            INIMIGO.max_hp = Math.round(antes * 1.25);
+            disparar({ type: 'combat.started', seq: 7001, data: { enemy: { ...INIMIGO,
+                id: 'wild-hp', created_at: '2026-08-21T11:00:00Z' } } });
+            disparar({ type: 'capture.failed', seq: 7002,
+                       data: { quality: 'epic', capsule_item_id: 'ultra-ball', capsule_name: 'Ultra Bola' } });
+            INIMIGO.max_hp = antes;
+            abaLost.click();
+            const l = win.document.querySelector('#pp-rt-rows .pp-rt-row--log[data-i]');
+            l.dispatchEvent(new win.MouseEvent('mouseover', { bubbles: true }));
+            const tip = win.document.querySelector('#pp-rt-tip, .pp-rt-tip');
+            return !!tip && /como seriam capturado/.test(tip.textContent)
+                && !/sem projeção/.test(tip.textContent);
+        })(), 'projeção deve sobreviver ao HP inflado');
+
         t('o filtro de forma fica na MESMA fileira dos outros',
             /#pp-rt-filters \{[^}]*grid-template-columns: 1\.15fr 1fr \.68fr \.68fr \.8fr \.85fr/.test(code)
             && /#pp-rt-filters\.pp-sem-destino\.pp-sem-destino \{\s*grid-template-columns: 1\.35fr 1\.15fr \.78fr \.78fr \.95fr/.test(code));
@@ -933,7 +1063,7 @@ t('script carrega sem lançar', !erroCarga, erroCarga && erroCarga.message);
 
         t('o filtro de destino some (não se aplica a perdido)',
             win.document.querySelector('#pp-rt-filters').classList.contains('pp-sem-destino'));
-        t('o rodapé anuncia o teto de 500', /500 perdidos/.test(
+        t('o rodapé anuncia o teto e a exceção dos notáveis', /500 perdidos comuns/.test(
             win.document.querySelector('#pp-rt-pager-info, .pp-rt-pager-info, #pp-rt-pager').textContent));
 
         // O cartão de análise tem que funcionar aqui também: o perdido tem
@@ -1029,6 +1159,143 @@ t('script carrega sem lançar', !erroCarga, erroCarga && erroCarga.message);
             capturar('mythical');
             t('com os avisos desligados, nada é enviado', postados.length === antes2);
             store.set('ppd_ligado_v1', true);
+
+            // ---- configuração sem diálogo do navegador ----
+            // Quem desmarca os avisos do Tampermonkey, ou bloqueia diálogos no
+            // Chrome, recebe null em todo prompt(). A configuração inteira
+            // parava de funcionar em silêncio.
+            // \b e não [^.\w]: excluir o ponto deixava "W.prompt(" passar, que é
+            // justamente a forma usada aqui.
+            t('o companheiro NÃO usa prompt/alert/confirm', (() => {
+                const limpo = codeD.replace(/\/\*[\s\S]*?\*\//g, ' ')
+                                   .replace(/^[ \t]*\/\/.*$/gm, ' ');
+                const m = /\b(prompt|alert|confirm)\s*\(/.exec(limpo);
+                return !m;
+            })(), 'nenhum diálogo nativo');
+            t('a configuração tem tela própria com os campos necessários',
+                /id="ppd-hook"/.test(codeD) && /id="ppd-hook-padrao"/.test(codeD)
+                && /id="ppd-min"/.test(codeD) && /id="ppd-on"/.test(codeD)
+                && /function abrirUi\(\)/.test(codeD));
+            t('os webhooks não ficam à mostra por padrão',
+                /id="ppd-hook" type="password"/.test(codeD)
+                && /id="ppd-ver" type="checkbox"/.test(codeD));
+            t('o resultado aparece na própria tela, não em alert',
+                /function aviso\(texto, tipo\)/.test(codeD)
+                && /ui\.status\.textContent = texto;/.test(codeD));
+
+            // Comportamental: abre a tela, muda a raridade, salva e confere.
+            {
+                const dlg = [];
+                const sandUi = Object.assign({}, sandbox, {
+                    prompt: m => { dlg.push(m); return null; },   // diálogos BLOQUEADOS
+                    alert: m => { dlg.push(m); },
+                    GM_xmlhttpRequest: o => { o.onload && o.onload({ status: 204, responseText: '' }); },
+                });
+                store.set('ppd_webhooks_v1', JSON.stringify({ '*': HOOK }));
+                store.set('ppd_minimos_v1', JSON.stringify({ '*': 'epic' }));
+                const menus = [];
+                sandUi.GM_registerMenuCommand = (nome, fn) => menus.push([nome, fn]);
+                try { vm.runInNewContext(codeD, vm.createContext(sandUi)); }
+                catch (e) { /* reportado abaixo */ }
+
+                const cmd = menus.find(([n]) => /configurar/i.test(n));
+                t('existe um comando de menu que abre a configuração', !!cmd,
+                    menus.map(([n]) => n).join(' | ') || 'nenhum');
+                if (cmd) {
+                    cmd[1]();
+                    const painel = win.document.querySelector('#ppd-fundo');
+                    t('a tela de configuração abre', !!painel && painel.className.includes('ppd-on'));
+                    t('nenhum diálogo do navegador foi chamado', dlg.length === 0, dlg.join(' | '));
+
+                    const sel = win.document.querySelector('#ppd-min');
+                    t('a raridade mínima é um campo de verdade, com as 7 opções',
+                        !!sel && sel.options.length === 7);
+                    sel.value = 'rare';
+                    win.document.querySelector('#ppd-salvar').click();
+                    let mins = {};
+                    try { mins = JSON.parse(store.get('ppd_minimos_v1')); } catch (e) {}
+                    t('mudar a raridade mínima FUNCIONA com diálogos bloqueados',
+                        mins['*'] === 'rare', JSON.stringify(mins));
+                    t('o retorno aparece na tela', /Salvo/.test(
+                        win.document.querySelector('#ppd-status').textContent));
+                    win.document.querySelector('#ppd-fechar').click();
+                    painel.remove();
+                }
+            }
+
+            // Prova de fogo: um mítico e um shiny, e depois 600 comuns por cima.
+            // Com o teto único de 500 os dois teriam sido apagados.
+            t('mítico e shiny sobrevivem a 600 perdidos comuns depois deles', (() => {
+                const enviar = (q, shiny, n) => {
+                    for (let i = 0; i < n; i++) {
+                        disparar({ type: 'combat.started', seq: 20000 + contadorSeq++, data: { enemy: {
+                            ...INIMIGO, id: 'w' + contadorSeq, created_at: '2026-08-21T12:00:' + (i % 60),
+                            quality: q, is_shiny: !!shiny } } });
+                        disparar({ type: 'capture.failed', seq: 20000 + contadorSeq++, data: {
+                            quality: q, capsule_item_id: 'ultra-ball', capsule_name: 'Ultra Bola' } });
+                    }
+                };
+                enviar('mythical', false, 1);
+                enviar('epic', true, 1);
+                enviar('common', false, 600);
+
+                abaLost.click();
+                const fShiny2 = win.document.querySelector('#pp-rt-f-shiny');
+                const fQ = win.document.querySelector('#pp-rt-f-q');
+                // filtra por shiny: o shiny antigo tem que continuar lá
+                fShiny2.value = 'shiny';
+                fShiny2.dispatchEvent(new win.Event('change', { bubbles: true }));
+                const temShiny = /Machamp/.test(win.document.querySelector('#pp-rt-rows').textContent);
+                fShiny2.value = '';
+                fShiny2.dispatchEvent(new win.Event('change', { bubbles: true }));
+                // filtra por mítica
+                let temMitico = false;
+                if (fQ) {
+                    fQ.value = 'mythical';
+                    fQ.dispatchEvent(new win.Event('change', { bubbles: true }));
+                    temMitico = /Machamp/.test(win.document.querySelector('#pp-rt-rows').textContent);
+                    fQ.value = '';
+                    fQ.dispatchEvent(new win.Event('change', { bubbles: true }));
+                }
+                return temShiny && temMitico;
+            })(), 'os dois notáveis têm que continuar no registro');
+
+            // Chance de captura no cartão: a declarada pelo jogo e a medida.
+            {
+                abaLost.click();
+                const l = win.document.querySelector('#pp-rt-rows .pp-rt-row--log[data-i]');
+                l.dispatchEvent(new win.MouseEvent('mouseover', { bubbles: true }));
+                const tip = win.document.querySelector('#pp-rt-tip, .pp-rt-tip');
+                const txt = tip ? tip.textContent.replace(/\s+/g, ' ') : '';
+                t('o cartão NÃO traz mais a chance de captura',
+                    !/Chance de captura/.test(txt), txt.slice(0, 160));
+                const cab = win.document.querySelector('.pp-rt-hrow--log').textContent;
+                t('o cabeçalho do registro tem a coluna Chance', /Chance/.test(cab), cab);
+                const cel = win.document.querySelector('#pp-rt-rows .pp-rt-cap-chance');
+                // Machamp 17,65 base · Ultra Ball 4× · nível 150 · Comum 1×
+                // 17,65 × 4 × 1/(1+150×0,012) × 0,3 = 7,5643%
+                t('a linha mostra a chance daquele encontro, pela fórmula da wiki',
+                    !!cel && /7,56/.test(cel.textContent), cel ? cel.textContent : 'sem célula');
+            }
+
+            // Shiny cai no piso do jogo: níveis bem diferentes, mesma chance.
+            // Foi assim que o piso apareceu — quatro leituras do simulador com
+            // fator de nível variando quase 3× e resultado sempre 0,01%.
+            {
+                const chanceDe = nivel => {
+                    disparar({ type: 'combat.started', seq: 30000 + nivel, data: { enemy: {
+                        ...INIMIGO, id: 'sh' + nivel, created_at: '2026-08-21T13:00:00Z',
+                        level: nivel, quality: 'legendary', is_shiny: true } } });
+                    disparar({ type: 'capture.failed', seq: 31000 + nivel, data: {
+                        quality: 'legendary', capsule_item_id: 'ultra-ball', capsule_name: 'Ultra Bola' } });
+                    abaLost.click();
+                    const c = win.document.querySelector('#pp-rt-rows .pp-rt-cap-chance');
+                    return c ? c.textContent.trim() : '';
+                };
+                const a1 = chanceDe(1), a150 = chanceDe(150);
+                t('shiny cai no piso: nível 1 e nível 150 dão a mesma chance',
+                    a1 === a150 && /0,01%/.test(a1), `nv1=${a1} nv150=${a150}`);
+            }
 
             // ---- duas contas, dois webhooks ----
             const HOOK_A = 'https://discord.com/api/webhooks/111/tokenA';
