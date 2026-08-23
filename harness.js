@@ -319,7 +319,7 @@ t('script carrega sem lançar', !erroCarga, erroCarga && erroCarga.message);
             !/ppDump|raioX|capturarTela|registrarSlotMiss|GM_registerMenuCommand|GM_setClipboard|TEMPOR/.test(code));
         t('auto-update religado', /@downloadURL\s+https:\/\/raw\.githubusercontent/.test(code)
             && /@updateURL\s+https:\/\/raw\.githubusercontent/.test(code));
-        t('versão 7.12.1 sem sufixo debug', /\/\/ @version\s+7\.12\.1\s*$/m.test(code));
+        t('versão 7.13.0 sem sufixo debug', /\/\/ @version\s+7\.13\.0\s*$/m.test(code));
         t('o principal anuncia a captura sem fazer requisição',
             /const EVENTO_CAPTURA = 'pokepixel-raridades:captura';/.test(code)
             && /W\.dispatchEvent\(new W\.CustomEvent\(EVENTO_CAPTURA/.test(code)
@@ -516,11 +516,20 @@ t('script carrega sem lançar', !erroCarga, erroCarga && erroCarga.message);
         t('busca do teto continua na lista sem repetição', /for \(const \[sobe, desce\] of PARES_NAT\)/.test(code));
         t('filtro de Pokémon existe no registro',
             /id="pp-rt-f-sp"/.test(code) && /fSp: overlay\.querySelector\('#pp-rt-f-sp'\)/.test(code)
-            && /\(!fsp \|\| e\.sp === fsp\)/.test(code));
+            && /\(!selSp\.size \|\| selSp\.has\(e\.sp\)\)/.test(code));
+        t('espécie e raridade aceitam várias marcações ao mesmo tempo',
+            /const selSp = new Set\(\);/.test(code) && /const selQ = new Set\(\);/.test(code)
+            && /\(!selQ\.size \|\| selQ\.has\(e\.q\)\)/.test(code)
+            && /function montarCaixas\(pop, itens, sel\)/.test(code));
+        t('conjunto vazio quer dizer TODAS, não nenhuma',
+            /cb\.checked = cb\.value === '' \? sel\.size === 0 : sel\.has\(cb\.value\);/.test(code)
+            && /if \(cb\.value === ''\) \{ {10}\/\/ "Todas": limpa a seleção/.test(code));
+        t('espécie que sai da lista sai da seleção junto',
+            /for \(const id of \[\.\.\.selSp\]\) if \(ids\.indexOf\(id\) < 0\) selSp\.delete\(id\);/.test(code));
         t('filtro de espécie acompanha o perfil de hunt ativo',
             /if \(perfilAtivo && e\.h !== perfilAtivo\) continue;/.test(code));
-        t('select de espécie não é reconstruído à toa (não perde a seleção)',
-            /els\.fSp\.__ppSig === assinatura/.test(code));
+        t('painel de espécie não é reconstruído à toa (não perde a marcação)',
+            /if \(pop\.__ppSig !== assinatura\) \{/.test(code));
         t('a versão aparece no painel, para dar para conferir sem sair do jogo',
             /const VERSAO = \(\(\) => \{/.test(code)
             && /GM_info\.script\.version/.test(code)
@@ -1295,6 +1304,60 @@ t('script carrega sem lançar', !erroCarga, erroCarga && erroCarga.message);
                 const a1 = chanceDe(1), a150 = chanceDe(150);
                 t('shiny cai no piso: nível 1 e nível 150 dão a mesma chance',
                     a1 === a150 && /0,01%/.test(a1), `nv1=${a1} nv150=${a150}`);
+            }
+
+            // Múltipla escolha: marcar duas raridades mostra as duas.
+            {
+                const gerar = (q, n) => {
+                    for (let i = 0; i < n; i++) {
+                        disparar({ type: 'combat.started', seq: 40000 + contadorSeq++, data: { enemy: {
+                            ...INIMIGO, id: 'm' + contadorSeq, created_at: '2026-08-21T14:00:00Z',
+                            quality: q, is_shiny: false } } });
+                        disparar({ type: 'capture.failed', seq: 40000 + contadorSeq++, data: {
+                            quality: q, capsule_item_id: 'ultra-ball', capsule_name: 'Ultra Bola' } });
+                    }
+                };
+                gerar('rare', 2); gerar('uncommon', 2); gerar('common', 2);
+                abaLost.click();
+
+                const btnQ = win.document.querySelector('#pp-rt-f-q');
+                const popQ = win.document.querySelector('#pp-rt-pop-q');
+                t('o filtro de raridade virou botão com painel de caixas',
+                    !!btnQ && btnQ.tagName === 'BUTTON' && !!popQ);
+
+                btnQ.click();
+                t('o painel abre ao clicar', popQ.classList.contains('pp-on'));
+                const cxs = [...popQ.querySelectorAll('input[type=checkbox]')];
+                t('há uma caixa por raridade, mais a de "Todas"', cxs.length === 8, String(cxs.length));
+
+                const marcar = v => {
+                    const cb = cxs.find(c => c.value === v);
+                    cb.checked = true;
+                    cb.dispatchEvent(new win.Event('change', { bubbles: true }));
+                };
+                const raridades = () => [...win.document.querySelectorAll('#pp-rt-rows .pp-rt-badge')]
+                    .map(b => b.textContent.trim());
+
+                marcar('rare');
+                const soRara = raridades();
+                t('uma raridade marcada filtra só ela',
+                    soRara.length > 0 && soRara.every(x => /Rara/.test(x)), JSON.stringify(soRara));
+
+                marcar('uncommon');
+                const duas = raridades();
+                t('DUAS raridades marcadas mostram as duas',
+                    duas.some(x => /Rara/.test(x)) && duas.some(x => /Incomum/.test(x))
+                    && !duas.some(x => /Comum$/.test(x)), JSON.stringify(duas));
+                t('o botão avisa quantas estão marcadas',
+                    /2 selecionadas/.test(btnQ.textContent), btnQ.textContent);
+
+                const todas = cxs.find(c => c.value === '');
+                todas.checked = true;
+                todas.dispatchEvent(new win.Event('change', { bubbles: true }));
+                t('"Todas" limpa a seleção e volta a mostrar tudo',
+                    raridades().some(x => /Comum/.test(x)) && /Todas/.test(btnQ.textContent),
+                    btnQ.textContent);
+                btnQ.click();
             }
 
             // ---- duas contas, dois webhooks ----
