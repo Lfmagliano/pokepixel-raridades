@@ -319,7 +319,7 @@ t('script carrega sem lançar', !erroCarga, erroCarga && erroCarga.message);
             !/ppDump|raioX|capturarTela|registrarSlotMiss|GM_registerMenuCommand|GM_setClipboard|TEMPOR/.test(code));
         t('auto-update religado', /@downloadURL\s+https:\/\/raw\.githubusercontent/.test(code)
             && /@updateURL\s+https:\/\/raw\.githubusercontent/.test(code));
-        t('versão 7.15.1 sem sufixo debug', /\/\/ @version\s+7\.15\.1\s*$/m.test(code));
+        t('versão 7.15.2 sem sufixo debug', /\/\/ @version\s+7\.15\.2\s*$/m.test(code));
         t('o principal anuncia a captura sem fazer requisição',
             /const EVENTO_CAPTURA = 'pokepixel-raridades:captura';/.test(code)
             && /W\.dispatchEvent\(new W\.CustomEvent\(EVENTO_CAPTURA/.test(code)
@@ -1403,6 +1403,38 @@ t('script carrega sem lançar', !erroCarga, erroCarga && erroCarga.message);
             const svgs = tip ? tip.querySelectorAll('svg').length : 0;
             t('os dois gráficos aparecem, agora medindo o IV', svgs >= 2, String(svgs));
         }
+
+        // O contador de shinies vivia no combat.started, que o jogo removeu:
+        // ele parou de subir enquanto a lista continuava marcando shiny.
+        {
+            const antes = win.document.querySelector('#pp-rt-t-shi').textContent;
+            const bolaNo = (id, shiny) => disparar({ type: 'capture.failed', seq: 4810 + contadorSeq++,
+                data: { capsule_item_id: 'capsule_ultra', capsule_name: 'Ultra Ball',
+                        chance: 0.05, is_shiny: shiny, iv_total: 70, level: 90, map_id: 13,
+                        quality: 'common', species_id: 'machamp', species_name: 'Machamp',
+                        wild_monster_id: id } });
+            bolaNo('spawn-A', true);
+            const depois1 = win.document.querySelector('#pp-rt-t-shi').textContent;
+            t('shiny do evento de captura é contado', depois1 !== antes && / 1$/.test(depois1),
+                `${antes} -> ${depois1}`);
+
+            bolaNo('spawn-A', true);   // segunda bola no MESMO selvagem
+            t('segunda bola no mesmo spawn não conta de novo',
+                win.document.querySelector('#pp-rt-t-shi').textContent === depois1,
+                win.document.querySelector('#pp-rt-t-shi').textContent);
+
+            bolaNo('spawn-B', true);
+            t('outro spawn shiny conta',
+                / 2$/.test(win.document.querySelector('#pp-rt-t-shi').textContent),
+                win.document.querySelector('#pp-rt-t-shi').textContent);
+
+            bolaNo('spawn-C', false);
+            t('não-shiny não mexe no contador',
+                / 2$/.test(win.document.querySelector('#pp-rt-t-shi').textContent),
+                win.document.querySelector('#pp-rt-t-shi').textContent);
+        }
+        t('o contador avisa o que ele mede, para a comparação com o jogo fazer sentido',
+            /Conta os shiny em que uma bola foi lançada/.test(code));
 
         t('espécie volta a aparecer, vinda do próprio evento de captura',
                 /Machamp/.test(txt), txt);
