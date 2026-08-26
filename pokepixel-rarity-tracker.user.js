@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pokepixel — Raridades
 // @namespace    https://pokepixel.nietore.com/
-// @version      7.15.1
+// @version      7.15.2
 // @description  Conta tentativas e capturas por qualidade (Fraca a Mítica) lendo os eventos de captura do jogo.
 // @author       Lfmagliano
 // @homepageURL  https://github.com/Lfmagliano/pokepixel-raridades
@@ -1794,6 +1794,26 @@
             if (succeeded) { alvo.captures[rarity]++; b.captures++; }
         }
 
+        // Shiny visto. Antes isso saía do combat.started, que o jogo removeu
+        // — o contador simplesmente parou de subir, enquanto a lista de
+        // perdidos continuava marcando shiny, porque ela vem daqui. Agora a
+        // contagem sai do próprio evento de captura, que traz `is_shiny`.
+        //
+        // A deduplicação usa o `wild_monster_id`, que identifica o spawn: se
+        // mais de uma bola for lançada no mesmo selvagem, ele conta uma vez
+        // só. A lista gravada sobrevive a recarregamento, senão um shiny na
+        // tela seria recontado a cada F5 — bug que este projeto já teve.
+        const idSpawn = String((data && data.wild_monster_id)
+            || (src && src.wild_monster_id) || '').slice(0, 100);
+        if (src.is_shiny && idSpawn) {
+            if (state.shinySeen.indexOf(idSpawn) < 0) {
+                state.shinySeen.push(idSpawn);
+                if (state.shinySeen.length > SHINY_SEEN_CAP) state.shinySeen.shift();
+                state.shinyEncounters++;
+                if (hunt) hunt.shinyEncounters++;
+            }
+        }
+
         if (succeeded) {
             if (hunt && src.is_shiny) hunt.shinyCaptures++;
             registrarCaptura(data, src, rarity, key);
@@ -2925,7 +2945,9 @@
                 <div class="pp-rt-totals">
                     <div class="pp-rt-total"><b id="pp-rt-t-att" style="color:#d9b665">0</b><span>Tentativas</span></div>
                     <div class="pp-rt-total"><b id="pp-rt-t-cap" style="color:#54d97c">0</b><span>Capturas</span></div>
-                    <div class="pp-rt-total"><b id="pp-rt-t-shi" style="color:#4fc6ea">0</b><span>Shinies</span></div>
+                    <div class="pp-rt-total"
+                         title="Capturados / vistos. Conta os shiny em que uma bola foi lançada — um que fuja antes disso não entra, então o número pode ficar abaixo do analisador do jogo.">
+                        <b id="pp-rt-t-shi" style="color:#4fc6ea">0</b><span>Shinies</span></div>
                 </div>
                 <div class="pp-rt-tabs">
                     <button class="pp-rt-tab pp-active" type="button" data-view="rarity">Por raridade</button>
