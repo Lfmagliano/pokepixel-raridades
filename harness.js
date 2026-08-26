@@ -319,7 +319,7 @@ t('script carrega sem lançar', !erroCarga, erroCarga && erroCarga.message);
             !/ppDump|raioX|capturarTela|registrarSlotMiss|GM_registerMenuCommand|GM_setClipboard|TEMPOR/.test(code));
         t('auto-update religado', /@downloadURL\s+https:\/\/raw\.githubusercontent/.test(code)
             && /@updateURL\s+https:\/\/raw\.githubusercontent/.test(code));
-        t('versão 7.13.0 sem sufixo debug', /\/\/ @version\s+7\.13\.0\s*$/m.test(code));
+        t('versão 7.15.1 sem sufixo debug', /\/\/ @version\s+7\.15\.1\s*$/m.test(code));
         t('o principal anuncia a captura sem fazer requisição',
             /const EVENTO_CAPTURA = 'pokepixel-raridades:captura';/.test(code)
             && /W\.dispatchEvent\(new W\.CustomEvent\(EVENTO_CAPTURA/.test(code)
@@ -957,9 +957,11 @@ t('script carrega sem lançar', !erroCarga, erroCarga && erroCarga.message);
         const linhas = [...win.document.querySelectorAll('#pp-rt-rows .pp-rt-row--log[data-i]')];
         const txt = linhas.map(l => l.textContent.replace(/\s+/g, ' ').trim()).join(' | ');
         t('a bola gasta que não capturou virou linha em Perdidos', linhas.length === 2, txt || '(vazio)');
-        t('a linha traz o retrato completo, vindo do combat.started',
-            /Machamp/.test(txt) && /110/.test(txt) && /adamant/i.test(txt) && /Ultra Ball/.test(txt),
-            txt);
+        // Natureza e gênero saíram das COLUNAS de Perdidos (o jogo não os
+        // envia mais); o retrato continua sendo lido, e aparece no cartão.
+        t('a linha traz o retrato do combat.started quando ele existe',
+            /Machamp/.test(txt) && /110/.test(txt) && /Ultra Ball/.test(txt)
+            && /Nv\. 150/.test(txt), txt);
         // O inimigo do combat.started não traz campo de poder; a soma dos seis
         // atributos é o que o próprio jogo exibe como PODER TOTAL.
         t('perdido é projetado para o nível de captura, não o do mapa', (() => {
@@ -1280,6 +1282,12 @@ t('script carrega sem lançar', !erroCarga, erroCarga && erroCarga.message);
                     !/Chance de captura/.test(txt), txt.slice(0, 160));
                 const cab = win.document.querySelector('.pp-rt-hrow--log').textContent;
                 t('o cabeçalho do registro tem a coluna Chance', /Chance/.test(cab), cab);
+        t('Perdidos não traz mais Natureza nem Gênero',
+            !/Natureza/.test(cab) && !/Gênero/.test(cab), cab);
+        t('a linha de perdido tem seis células, não oito', (() => {
+            const l = win.document.querySelector('#pp-rt-rows .pp-rt-row--lost');
+            return !!l && l.children.length === 6;
+        })(), String((win.document.querySelector('#pp-rt-rows .pp-rt-row--lost') || { children: [] }).children.length));
                 const cel = win.document.querySelector('#pp-rt-rows .pp-rt-cap-chance');
                 // Machamp 17,65 base · Ultra Ball 4× · nível 150 · Comum 1×
                 // 17,65 × 4 × 1/(1+150×0,012) × 0,3 = 7,5643%
@@ -1359,6 +1367,61 @@ t('script carrega sem lançar', !erroCarga, erroCarga && erroCarga.message);
                     btnQ.textContent);
                 btnQ.click();
             }
+
+    // ---- o evento de captura do jogo NOVO, sem combat.started nenhum ----
+        // Depois da atualização, o combate virou quadro de animação e o
+        // capture.failed passou a trazer espécie, nível, mapa, IV total, shiny e
+        // a chance já calculada. É dele que tudo tem que sair agora.
+        {
+            disparar({ type: 'capture.failed', seq: 4800, data: {
+                capsule_item_id: 'capsule_ultra', capsule_name: 'Ultra Ball',
+                chance: 0.048359728506787325, event_id: 9, is_shiny: false,
+                iv_total: 60, level: 90, map_id: 13, quality: 'uncommon',
+                species_id: 'machamp', species_name: 'Machamp',
+            } });
+            abaLost.click();
+            const linha = win.document.querySelector('#pp-rt-rows .pp-rt-row--log[data-i]');
+            const txt = linha ? linha.textContent.replace(/\s+/g, ' ') : '';
+            // Cartão do perdido no jogo NOVO: sem multiplicador, natureza, gênero
+        // e IV por atributo, mas com tier e IV total.
+        {
+            const l = win.document.querySelector('#pp-rt-rows .pp-rt-row--log[data-i]');
+            l.dispatchEvent(new win.MouseEvent('mouseover', { bubbles: true }));
+            const tip = win.document.querySelector('#pp-rt-tip, .pp-rt-tip');
+            const txt = tip ? tip.textContent.replace(/\s+/g, ' ') : '';
+            t('o cartão NÃO diz mais só "Indisponível"',
+                !/Indisponível/.test(txt), txt.slice(0, 140));
+            t('mostra análise parcial rotulada como parcial',
+                /Análise — parcial, só pelo IV/.test(txt), txt.slice(0, 200));
+            t('e explica por que a nota completa não existe',
+                /o jogo não envia multiplicador, natureza, gênero nem IV por atributo/.test(txt),
+                txt.slice(0, 320));
+            t('a caixa vazia de Poder total virou a chance da tentativa',
+                /Chance de captura ?4,84/.test(txt) && !/Poder total ?0/.test(txt), txt.slice(0, 160));
+            t('seções sem dado somem em vez de ficarem vazias',
+                !/Genética/.test(txt) && !/Sem dados desta captura/.test(txt), txt.slice(0, 220));
+            const svgs = tip ? tip.querySelectorAll('svg').length : 0;
+            t('os dois gráficos aparecem, agora medindo o IV', svgs >= 2, String(svgs));
+        }
+
+        t('espécie volta a aparecer, vinda do próprio evento de captura',
+                /Machamp/.test(txt), txt);
+            t('nível do selvagem vem do evento', /Nv\. 90/.test(txt), txt);
+            t('a chance usada é a que o JOGO calculou, não a minha fórmula',
+                /4,84%/.test(txt), txt);
+            const hunt = win.document.querySelector('#pp-rt-hunt');
+            // O andaime de diagnóstico das 7.13.1–7.13.3 saiu do rodapé: ele
+        // apontou a mudança do jogo e depois virava ruído permanente.
+        t('o rodapé não traz mais o despejo de eventos e estruturas',
+            !/ESTRUTURA: /.test(code) && !/eventos novos: /.test(code)
+            && !/CRIATURA EM: /.test(code) && !/function esbocar\(/.test(code)
+            && !/eventosDesconhecidos/.test(code));
+        t('mas o aviso curto de dado faltando fica',
+            /o jogo parou de enviar o detalhe do combate/.test(code)
+            && /!recebeuCombate/.test(code));
+        t('a hunt é identificada por mapa+espécie do evento de captura',
+                !!hunt && /Machamp/.test(hunt.textContent), hunt ? hunt.textContent : 'sem elemento');
+        }
 
             // ---- duas contas, dois webhooks ----
             const HOOK_A = 'https://discord.com/api/webhooks/111/tokenA';
