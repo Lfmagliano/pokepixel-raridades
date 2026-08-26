@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pokepixel — Raridades
 // @namespace    https://pokepixel.nietore.com/
-// @version      7.15.2
+// @version      7.15.3
 // @description  Conta tentativas e capturas por qualidade (Fraca a Mítica) lendo os eventos de captura do jogo.
 // @author       Lfmagliano
 // @homepageURL  https://github.com/Lfmagliano/pokepixel-raridades
@@ -2774,6 +2774,12 @@
         font-size: 10px; letter-spacing: .1em; text-transform: uppercase;
         height: 26px; box-sizing: border-box;
     }
+    /* A altura do cabeçalho é fixa, então uma quebra de linha vaza por cima
+       da primeira linha da tabela. Rótulo que não couber corta com
+       reticências em vez de estourar o layout. */
+    .pp-rt-hrow > div {
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
     .pp-rt-row {
         background: #16161a; border: 1px solid #26262e; border-radius: 10px;
         padding: 9px 14px; margin-bottom: 5px;
@@ -4467,7 +4473,11 @@
         // Perdidos, a aba Por pokébola herdava as colunas do registro.
         const cabecalho = primeira => {
             els.hrow.style.display = '';
-            els.hrow.classList.remove('pp-rt-hrow--log');
+            // As DUAS classes de registro saem juntas. Removendo só a de log,
+            // a de perdidos (seis colunas) sobrava aqui e espremia a quinta
+            // célula: "Taxa de captura" quebrava em duas linhas e vazava da
+            // altura fixa do cabeçalho.
+            els.hrow.classList.remove('pp-rt-hrow--log', 'pp-rt-hrow--lost');
             els.hrow.innerHTML = `<div id="pp-rt-h1">${primeira}</div><div>Tentativas</div>`
                 + '<div>Capturas</div><div>Perdidos</div><div>Taxa de captura</div>';
             els.head1 = els.hrow.querySelector('#pp-rt-h1');
