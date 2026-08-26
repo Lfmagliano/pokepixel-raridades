@@ -6,19 +6,19 @@ E, desde a versão 5, um **analisador** que responde a pergunta que o jogo não 
 
 A conta que ele faz é **a mesma do [PPTools](https://www.pptools.com.br/qualificadora-de-pokemon)**, com autorização do autor. Os dois dão o mesmo número porque usam a mesma fórmula.
 
-## O que mudou na versão 7.8
+## O que mudou na versão 7.15
+
+Esta versão responde a uma **atualização do jogo** que mudou o que ele transmite. Detalhes em [O que a atualização do jogo levou](#o-que-a-atualização-do-jogo-levou).
 
 | Mudança | Onde |
 | --- | --- |
-| A nota do analisador passou a usar o modelo do PPTools | [Como a nota é calculada](#como-a-nota-é-calculada) |
-| A fórmula de atributo agora é a exata, não mais um ajuste empírico | [Como o jogo funciona](#a-fórmula-de-atributo) |
-| Nova aba **Perdidos**: as bolas gastas que não capturaram | [O que a extensão mostra](#o-que-a-extensão-mostra) |
-| Coluna **Perdidos** no resumo por raridade e por pokébola | idem |
-| Filtro **Forma** (normal / shiny) nos dois registros | idem |
-| Aviso no Discord ao capturar algo raro, por conta | [Aviso no Discord](#aviso-no-discord-opcional) |
-| O analisador não aparece mais no mapa de caçadas | [Onde ele aparece](#onde-ele-aparece) |
-| IV por atributo com contraste legível no cartão | — |
-| Zerar e excluir confirmam **dentro do painel**, em dois cliques | [Estatísticas por hunt](#estatísticas-por-hunt) |
+| Espécie, nível, hunt e perfis voltam a funcionar, lidos do evento de captura | [O que a atualização do jogo levou](#o-que-a-atualização-do-jogo-levou) |
+| Coluna **Chance** usa a probabilidade que o próprio jogo calcula | [Chance de captura](#chance-de-captura) |
+| Cartão dos perdidos com **análise parcial** quando falta dado | idem |
+| Perdidos perdeu as colunas Natureza e Gênero — o jogo não as envia mais | [O que a extensão mostra](#o-que-a-extensão-mostra) |
+| Filtros de **Pokémon** e **Raridade** aceitam várias marcações | idem |
+| Perdidos são projetados para o nível de captura, comparáveis com as capturas | [Perdidos no nível de captura](#perdidos-no-nível-de-captura) |
+| Lendário, mítico e shiny nunca saem do registro de perdidos | [O que a extensão mostra](#o-que-a-extensão-mostra) |
 
 ## O analisador
 
@@ -134,13 +134,15 @@ São quatro abas, numa fileira só.
 
 **Por pokébola** — os mesmos números separados por tipo de bola, cada uma com seu ícone nas cores reais. A **Cassino Eevee** tem linha própria: o jogo a conta como captura, mas nenhuma bola foi jogada, e misturá-la distorceria a taxa das bolas de verdade.
 
-**Capturas** — o registro das últimas 100 capturas, uma por linha, com raridade, IV total, natureza, gênero, bola usada e destino.
+**Capturas** — o registro das últimas 100 capturas, uma por linha, com raridade, IV total, natureza, gênero, bola usada, chance daquela tentativa e destino.
 
-**Perdidos** — o registro das últimas 500 bolas gastas que **não** capturaram, no mesmo formato. A última coluna troca o destino pelo **nível** do selvagem, que é informação que o registro de capturas nunca tem: captura nasce no nível 1, o que escapou estava no nível do mapa.
+**Perdidos** — o registro das bolas gastas que **não** capturaram, com raridade, IV total, bola, chance e o **nível** do selvagem. Natureza e gênero não aparecem aqui: [o jogo parou de enviá-los](#o-que-a-atualização-do-jogo-levou).
 
-Os dois registros têm filtros por **Pokémon**, raridade, faixa de IV e **forma** (normal ou shiny) — e o de capturas ainda tem o de destino. O filtro de espécie lista só o que existe no perfil selecionado, então acompanha a hunt escolhida. Pokémon shiny aparece com o sprite shiny na linha.
+O teto é de **500 perdidos comuns** — mas lendário, mítico e shiny têm espaço próprio e não disputam vaga com eles. Perder o registro de um mítico que escapou porque 500 comuns entraram depois seria absurdo; é justamente o que ninguém quer esquecer.
 
-**Detalhes no hover** — nas duas abas, o cartão completo do Pokémon, com os atributos de batalha, a genética e a análise.
+Os dois registros filtram por **Pokémon**, **raridade**, faixa de IV e **forma** (normal ou shiny) — e o de capturas ainda tem o de destino. Pokémon e raridade aceitam **várias marcações ao mesmo tempo**: o botão abre um painel de caixas, e nenhuma marcada quer dizer todas. O filtro de espécie lista só o que existe no perfil selecionado, então acompanha a hunt escolhida. Pokémon shiny aparece com o sprite shiny na linha.
+
+**Detalhes no hover** — nas duas abas, o cartão do Pokémon com o que houver: atributos, genética e análise nas capturas; nos perdidos, o que o jogo ainda envia.
 
 Sobre a coluna **Perdidos** no resumo: ela é `tentativas − capturas`, não o tamanho do registro. O registro tem teto de 500; os contadores não têm. Se a coluna saísse da lista, ela pararia de crescer depois de 500 e passaria a mentir — em silêncio, que é pior.
 
@@ -166,6 +168,53 @@ Dois botões atuam sobre o perfil selecionado:
 Os dois pedem confirmação **no próprio botão**: o primeiro clique arma e o texto muda para um aviso em vermelho, o segundo executa, e sozinho ele desarma em 5 segundos. Não é firula — a versão anterior usava o `confirm()` do navegador, que falha em silêncio: depois de alguns diálogos o Chrome oferece "impedir que esta página crie mais diálogos", e quem marca isso passa a receber uma recusa automática em toda chamada seguinte. O botão simplesmente parava de funcionar, sem erro nenhum.
 
 Nos dois casos os números dela **saem do total**, do contrário o total guardaria valores que não aparecem em perfil nenhum.
+
+## O que a atualização do jogo levou
+
+Em agosto de 2026 o jogo trocou o fluxo de combate. O evento que trazia o **retrato completo do selvagem** deixou de existir; no lugar entraram quadros de animação (`hunt.frame`, com coordenadas e um blob binário) e um `hunt.events` com posições de fila.
+
+Isso tirou quatro dados de quem **escapa**: IV por atributo, natureza, gênero e multiplicador de qualidade. Sem o multiplicador não há nota, então a análise cheia dos perdidos ficou impossível — não por limitação da extensão, mas porque o dado não é mais transmitido. Foi confirmado varrendo todos os eventos por formato, até seis níveis de profundidade, e por um segundo desenvolvedor de extensão que chegou ao mesmo payload de forma independente.
+
+**O que voltou.** O evento `capture.failed` passou a trazer espécie, nome, nível do selvagem, mapa, IV total, shiny — e a **chance de captura já calculada pelo servidor**. Daí saem de novo o nome e o sprite na linha, o nível, a identificação da **hunt atual** e os **perfis por mapa**.
+
+**O que ficou melhor.** A chance agora é a do próprio jogo, que conhece bônus de zona e pessoais que a extensão não teria como saber. A fórmula própria continua no código, usada só para as entradas antigas gravadas antes de o jogo passar a informar.
+
+**O que sobrou de meio-caminho.** O cartão de um perdido mostra uma **análise parcial**: onde o IV total cai dentro da faixa daquele tier, e dentro da faixa inteira possível. Vem rotulada como parcial e explica por quê. Meia informação verdadeira vale mais que nenhuma; o que não vale é meia informação passando por inteira.
+
+As **capturas** não foram afetadas: o evento de sucesso continua trazendo o retrato completo, e o cartão delas segue com análise, genética e atributos.
+
+## Chance de captura
+
+Cada linha dos dois registros mostra a chance daquela tentativa. Quando o jogo informa, é o número dele. Para as entradas antigas, a extensão calcula pela fórmula publicada na wiki:
+
+```
+base       = taxa da espécie ÷ 255 × multiplicador da cápsula
+nível      = 1 ÷ (1 + nível selvagem × 0,012)
+chance     = base × nível × 0,3 × penalidade da qualidade × shiny
+```
+
+A penalidade por qualidade é o que mais pesa, e é brutal:
+
+| Qualidade | Multiplicador |
+| --- | --- |
+| Fraca / Comum | 100% |
+| Incomum | 95% |
+| Rara | 60% |
+| Épica | 9% |
+| Lendária | 0,9% |
+| Mítica | 0,09% |
+
+Duas notas sobre a fórmula. A escala de nível é **0,012**, não o 0,01 que o simulador do jogo exibe — ele arredonda; conferido em três níveis, a conta com 0,012 reproduz os resultados na quarta casa decimal e com 0,01 nenhum fecha. E o jogo aplica um **piso de 0,01%**: todo shiny cai nele, porque o multiplicador de shiny derruba o produto ordens de grandeza abaixo. Ver 0,01% num shiny quer dizer "o mínimo garantido", não a chance real.
+
+## Perdidos no nível de captura
+
+Um selvagem aparece no nível do mapa; uma captura nasce no nível 1. Mostrar 2.846 de poder ao lado de capturas de 105 não compara nada, então o perdido é **projetado** para o que ele seria se a bola tivesse acertado.
+
+A conversão não reconstrói o valor do zero — ela **mede**. Divide cada atributo que o jogo mandou pelo valor cru daquele nível e usa o mesmo fator do outro lado. Assim multiplicador, expoente de qualidade e bônus de shiny se cancelam, e a extensão não precisa conhecer nenhum deles.
+
+Dois cuidados que a conta exige. O **HP fica fora da medição**: o selvagem vem com cerca de 25% mais HP do que a fórmula prevê — bônus de combate, para a batalha durar —, enquanto os outros cinco atributos batem na casa do milésimo. E o **bônus de treinador** entra depois, deduzido das suas próprias capturas, porque ele se aplica aos seus Pokémon e não ao selvagem.
+
+Se os cinco atributos não concordarem entre si, a projeção é descartada e o cartão diz o motivo. Melhor não mostrar do que mostrar inventado.
 
 ## Quando o servidor engasga
 
@@ -315,8 +364,8 @@ O jogo transmite os eventos de combate por WebSocket, cada um numerado sequencia
 
 | Evento | Para quê |
 | --- | --- |
-| `combat.started` | Identifica a espécie da hunt, conta shinies vistos e guarda o retrato do selvagem |
-| `capture.failed` | Uma tentativa que não deu certo — alimenta a aba Perdidos |
+| `combat.started` | **Não existe mais.** Trazia o retrato completo do selvagem; ver [O que a atualização do jogo levou](#o-que-a-atualização-do-jogo-levou) |
+| `capture.failed` | Tentativa que falhou. Desde a atualização traz espécie, nível, mapa, IV total, shiny e a chance calculada — alimenta a aba Perdidos e identifica a hunt |
 | `capture.success` | Uma captura, com a criatura completa |
 | `chat.message` | Os Pokémon marcados no chat, para o analisador |
 
@@ -357,7 +406,7 @@ O script foi revisado por terceiros e as correções sugeridas estão aplicadas 
 - Nenhum fragmento do token de sessão é gravado — quando o JWT não traz um identificador, é usado um valor derivado.
 - O conteúdo do chat de outros jogadores nunca é armazenado.
 
-O repositório traz o `harness.js`, uma suíte de **191 testes** que roda o arquivo publicado num DOM simulado. Ela não testa lógica copiada: carrega o `.user.js` de verdade, simula WebSocket, `fetch` e as APIs do Tampermonkey, e confere o comportamento de fora para dentro — inclusive que nenhuma requisição própria apareceu e que o companheiro do Discord não fala com nada além do Discord. Para rodar: `npm install jsdom` e `node harness.js`.
+O repositório traz o `harness.js`, uma suíte de **256 testes** que roda o arquivo publicado num DOM simulado. Ela não testa lógica copiada: carrega o `.user.js` de verdade, simula WebSocket, `fetch` e as APIs do Tampermonkey, e confere o comportamento de fora para dentro — inclusive que nenhuma requisição própria apareceu e que o companheiro do Discord não fala com nada além do Discord. Para rodar: `npm install jsdom` e `node harness.js`.
 
 Se encontrar algo, abra uma [issue](https://github.com/Lfmagliano/pokepixel-raridades/issues).
 
