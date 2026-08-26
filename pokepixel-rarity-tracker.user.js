@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pokepixel — Raridades
 // @namespace    https://pokepixel.nietore.com/
-// @version      7.13.0
+// @version      7.15.1
 // @description  Conta tentativas e capturas por qualidade (Fraca a Mítica) lendo os eventos de captura do jogo.
 // @author       Lfmagliano
 // @homepageURL  https://github.com/Lfmagliano/pokepixel-raridades
@@ -339,6 +339,7 @@
             q: RARITY_KEYS.includes(e.q) ? e.q : 'weak',
             lvl: safeCount(e.lvl),
             lvlSel: safeCount(e.lvlSel),
+            chance: Number.isFinite(e.chance) && e.chance >= 0 ? e.chance : 0,
             iv: Math.min(safeCount(e.iv), IV_MAX),
             det: Array.isArray(e.det) && e.det.length === IV_STATS.length
                 ? e.det.map(v => Math.min(safeCount(v), IV_STAT_MAX)) : null,
@@ -1607,6 +1608,9 @@
     // Inimigo do combate corrente, do combat.started. Só memória: o que
     // interessa dele já vai gravado na entrada de perdido.
     let ultimoInimigo = null;
+    // Se algum combat.started já chegou nesta sessão. Distingue "o jogo mudou
+    // o evento" de "você ainda não caçou nada".
+    let recebeuCombate = false;
 
     function encerrarHunt() {
         huntAtual = null;
@@ -1637,6 +1641,7 @@
         // cartão de detalhes ficaria pela metade. Guardado antes do dedupe:
         // um combat.started repetido continua sendo o inimigo corrente.
         ultimoInimigo = enemy;
+        recebeuCombate = true;
 
         // Só interessa marcar shiny visto; o que alimenta a taxa é a bola.
         const key = `${enemy.id}|${enemy.created_at}`;
@@ -1646,9 +1651,24 @@
             seenCombat.delete(seenCombat.keys().next().value);
         }
 
+        garantirHunt(enemy.map_id, enemy.species_id);
+        return true;
+    }
+
+    // Identifica (e cria, se preciso) a hunt de um mapa+espécie.
+    //
+    // Antes isso morava dentro de onCombatStarted. A atualização do jogo
+    // trocou o evento de combate por quadros de animação, e a extensão ficou
+    // sem hunt nenhuma — mas o `capture.failed` passou a trazer `map_id` e
+    // `species_id`, que são exatamente a chave. Separado aqui, os dois
+    // caminhos alimentam a mesma identificação.
+    function garantirHunt(mapId, spId) {
+        if (!state) return false;
+        const enemy = { map_id: mapId, species_id: spId };
         // Só refaz o cartão quando a hunt muda de fato; sem isso o sprite
         // seria reatribuído a cada combate e a imagem recarregaria à toa.
         const chave = `${enemy.map_id != null ? enemy.map_id : ''}|${enemy.species_id || ''}`;
+        if (!enemy.species_id && enemy.map_id == null) return false;
         huntAtual = chave;
 
         if (!BLOCKED_KEYS.has(chave)) {
@@ -1742,6 +1762,18 @@
 
         const rarity = markQuality(src.quality);
         if (!rarity) return;
+
+        // O evento de captura passou a trazer espécie e mapa. Isso é o que
+        // devolve a hunt depois que o jogo trocou o evento de combate por
+        // quadros de animação — e também mantém a caçada marcada como viva,
+        // papel que era do combat.started.
+        const mapaEvt = data && data.map_id != null ? data.map_id : (src && src.map_id);
+        const spEvt = (data && data.species_id) || (src && src.species_id);
+        if (spEvt || mapaEvt != null) {
+            garantirHunt(mapaEvt, spEvt);
+            ultimoCombate = Date.now();
+            cacadaEncerrada = false;
+        }
 
 
 
@@ -1966,6 +1998,12 @@
     // bônus pessoais, então o número é comparável ao que ele mostra.
     function chanceDe(e) {
         if (!e) return null;
+        // Quando o jogo manda a chance dele, ela GANHA da minha fórmula: ele
+        // sabe dos bônus de zona e pessoais, e eu não. Só uso a fórmula para
+        // as entradas antigas, gravadas antes de o jogo passar a informar.
+        if (Number.isFinite(e.chance) && e.chance > 0) {
+            return Math.min(CAP_TETO, Math.max(CAP_PISO, e.chance));
+        }
         const sp = e.sp && speciesIndex.get(e.sp);
         const base = sp && Number.isFinite(Number(sp.cap)) ? Number(sp.cap) : null;
         if (base === null) return null;                       // espécie ainda não indexada
@@ -2044,6 +2082,11 @@
         if (!state) return;
         const inimigo = ultimoInimigo && markQuality(ultimoInimigo.quality) === rarity
             ? ultimoInimigo : null;
+        // O próprio evento passou a trazer espécie, nome, nível, IV total,
+        // shiny e a chance já calculada pelo jogo. Quando vier, ele é a
+        // fonte — o inimigo retido do combate virou reserva para o que ele
+        // não traz (IV por atributo, natureza, gênero, multiplicador).
+        const ev = data || {};
         const ivs = inimigo && inimigo.ivs && typeof inimigo.ivs === 'object' ? inimigo.ivs : null;
         const det = ivs ? IV_STATS.map(([k]) => Math.min(Number(ivs[k]) || 0, IV_STAT_MAX)) : null;
         const ivEvento = Number(data && (data.iv_total != null ? data.iv_total : data.ivTotal));
@@ -2060,15 +2103,21 @@
             || (bat ? bat.reduce((s, v) => s + v, 0) : 0));
 
         state.perdidos.unshift({
-            sp: String((inimigo && inimigo.species_id) || '').slice(0, 40),
-            nome: String((inimigo && (inimigo.species_name || inimigo.species_id)) || '?').slice(0, 40),
+            sp: String(ev.species_id || (inimigo && inimigo.species_id) || '').slice(0, 40),
+            nome: String(ev.species_name || ev.species_id
+                || (inimigo && (inimigo.species_name || inimigo.species_id)) || '?').slice(0, 40),
             q: rarity,
             // Selvagem vem no nível do mapa — ao contrário das capturas, que
             // nascem no nível 1. É justamente o que a coluna final mostra.
-            lvl: Number(inimigo && inimigo.level) || 0,
-            lvlSel: Number(inimigo && inimigo.level) || 0,
+            lvl: Number(ev.level) || Number(inimigo && inimigo.level) || 0,
+            lvlSel: Number(ev.level) || Number(inimigo && inimigo.level) || 0,
+            // Chance calculada pelo PRÓPRIO jogo, em fração. Melhor que a
+            // minha fórmula: inclui bônus de zona e pessoais, que a extensão
+            // não tem como conhecer. Vem só nos eventos novos.
+            chance: Number.isFinite(Number(ev.chance)) ? Number(ev.chance) * 100 : 0,
             iv: Math.min(det ? det.reduce((s, v) => s + v, 0)
                              : (Number.isFinite(ivEvento) ? ivEvento : 0), IV_MAX),
+            // (o IV por atributo continua vindo só do combate, quando houver)
             det,
             mult: Number(inimigo && inimigo.quality_multiplier) || 0,
             bat,
@@ -2079,7 +2128,7 @@
             bola: ballKeyName,
             h: huntAtual || '',
             sold: false,
-            shiny: !!(inimigo && inimigo.is_shiny),
+            shiny: !!(ev.is_shiny || (inimigo && inimigo.is_shiny)),
             at: new Date().toISOString(),
         });
 
@@ -2551,6 +2600,13 @@
         grid-template-columns: 1.45fr .82fr .68fr .82fr .85fr .92fr .7fr .78fr;
         gap: 14px; align-items: center;
     }
+    /* Perdidos não têm natureza nem gênero: seis colunas, e o que sobra vai
+       para as que carregam dado. Especificidade tripla para vencer a regra
+       acima, que tem a mesma e vem antes. */
+    .pp-rt-hrow.pp-rt-hrow--lost.pp-rt-hrow--lost,
+    .pp-rt-row.pp-rt-row--lost.pp-rt-row--lost {
+        grid-template-columns: 1.9fr 1fr .9fr 1.15fr .85fr .9fr;
+    }
     .pp-rt-row.pp-rt-row--log { padding: 7px 14px; height: 42px; }
 
     .pp-rt-cap-nome {
@@ -2800,6 +2856,10 @@
         .pp-rt-hrow, .pp-rt-row { grid-template-columns: 1.2fr .55fr .55fr .55fr 1.05fr; gap: 8px; }
         .pp-rt-hrow.pp-rt-hrow--log, .pp-rt-row.pp-rt-row--log {
             grid-template-columns: 1.3fr .75fr .62fr .75fr .78fr .85fr .62fr .7fr; gap: 9px;
+        }
+        .pp-rt-hrow.pp-rt-hrow--lost.pp-rt-hrow--lost,
+        .pp-rt-row.pp-rt-row--lost.pp-rt-row--lost {
+            grid-template-columns: 1.7fr .9fr .8fr 1fr .78fr .82fr; gap: 9px;
         }
         #pp-rt-foot { flex-direction: column; align-items: stretch; }
     }
@@ -3523,8 +3583,13 @@
         const teto = perdidos ? LOST_CAP : LOG_CAP;
         els.hrow.style.display = '';
         els.hrow.classList.add('pp-rt-hrow--log');
+        // Natureza e gênero não existem em perdido desde que o jogo parou de
+        // enviar o detalhe do combate. Duas colunas de traço só roubavam
+        // espaço das que têm dado.
+        els.hrow.classList.toggle('pp-rt-hrow--lost', !!perdidos);
         els.hrow.innerHTML = '<div>Pokémon</div><div>Raridade</div><div>IV</div>'
-            + '<div>Natureza</div><div>Gênero</div><div>Pokébola</div><div>Chance</div>'
+            + (perdidos ? '' : '<div>Natureza</div><div>Gênero</div>')
+            + '<div>Pokébola</div><div>Chance</div>'
             + `<div style="text-align:right">${perdidos ? 'Nível' : 'Destino'}</div>`;
         esconderTip();
 
@@ -3572,7 +3637,7 @@
                 const nome = (sp && sp.name) || prettify(e.nome);
 
                 return `
-                <div class="pp-rt-row pp-rt-row--log" data-i="${i}">
+                <div class="pp-rt-row pp-rt-row--log${perdidos ? ' pp-rt-row--lost' : ''}" data-i="${i}">
                     <span class="pp-rt-cap-nome">
                         ${img ? `<img class="pp-rt-cap-img" src="${escapeHtml(img)}" alt="" />` : ''}
                         <span>${escapeHtml(nome)}${e.shiny ? ' ✦' : ''}</span>
@@ -3581,8 +3646,9 @@
                           box-shadow: 0 0 9px ${r.color}59, inset 0 0 9px ${r.color}1f;
                           text-shadow: 0 0 7px ${r.color}8c;">${r.label}</span>
                     <span class="pp-rt-cap-iv">${fmt(e.iv)}<span class="pp-rt-muted">/${IV_MAX}</span></span>
+                    ${perdidos ? '' : `
                     <span class="pp-rt-cap-nat">${escapeHtml(e.nat)}</span>
-                    <span class="pp-rt-cap-gen">${GENERO_NOME[e.gen] || '—'}</span>
+                    <span class="pp-rt-cap-gen">${GENERO_NOME[e.gen] || '—'}</span>`}
                     <span class="pp-rt-cap-bola">
                         ${bola ? iconeBola(bola) : ''}${escapeHtml(bola ? bola.label : e.bola)}
                     </span>
@@ -4035,12 +4101,73 @@
         return 'não consegui calcular';
     }
 
+    /* ---------------------------------------------------------------
+     * ANÁLISE PARCIAL — só pelo IV total
+     *
+     * A atualização do jogo tirou do WebSocket o retrato do selvagem: IV por
+     * atributo, natureza, gênero e multiplicador de qualidade não chegam
+     * mais. Sem o multiplicador não há nota, e a análise cheia fica
+     * impossível para quem escapou.
+     *
+     * O que sobrou ainda responde a pergunta principal — "esse que fugiu era
+     * bom?" — porque tier e IV total continuam vindo. Então em vez de
+     * "Indisponível", o cartão mostra a posição do IV dentro da faixa do
+     * tier e dentro da faixa inteira da espécie, sempre rotulado como
+     * parcial. Meia informação verdadeira vale mais que nenhuma; o que não
+     * vale é meia informação passando por inteira.
+     * ------------------------------------------------------------- */
+    function analiseParcialHtml(e) {
+        const ivB = faixas && faixas.iv && faixas.iv[e.q];
+        const iv = Number(e.iv) || 0;
+        if (!ivB || !(iv > 0)) return null;
+
+        const r = RARITIES.find(x => x.key === e.q) || RARITIES[0];
+        const faixa = Math.max(1, ivB.max - ivB.min);
+        const pctTier = Math.max(0, Math.min(100, ((iv - ivB.min) / faixa) * 100));
+        // Faixa inteira possível: do pior IV que a Fraca permite ao melhor
+        // que a Mítica permite.
+        const todos = RARITY_KEYS.map(k => faixas.iv[k]).filter(Boolean);
+        const minG = Math.min(...todos.map(b => b.min));
+        const maxG = Math.max(...todos.map(b => b.max));
+        const pctEsp = Math.max(0, Math.min(100, ((iv - minG) / Math.max(1, maxG - minG)) * 100));
+
+        const arcoTier = [r.color, claro(r.color, 0.55)];
+        const arcoEsp = RARITIES.map(x => x.color);
+        return `<div class="pp-rt-tip-sec pp-rt-an">
+            <p class="pp-rt-tip-head">Análise
+                <span class="pp-rt-fonte">— parcial, só pelo IV</span></p>
+            <div class="pp-rt-pzs">
+                ${pizza(pctTier, arcoTier, 'do IV da ' + (r.label || '').toLowerCase())}
+                ${pizza(pctEsp, arcoEsp, 'do IV possível')}
+            </div>
+            <p class="pp-rt-leg">
+                <b>1º gráfico:</b> onde o IV ${fmt(iv)} cai na faixa
+                ${fmt(ivB.min)}–${fmt(ivB.max)} que a ${escapeHtml(r.label)} permite.
+                0% é o pior IV do tier, 100% é o melhor.<br>
+                <b>2º gráfico:</b> o mesmo, medido na faixa inteira
+                ${fmt(minG)}–${fmt(maxG)}, do pior IV possível ao melhor.
+            </p>
+            <ul class="pp-rt-why">
+                <li>IV total <b>${fmt(iv)}</b> na faixa ${fmt(ivB.min)}–${fmt(ivB.max)}
+                    da ${escapeHtml(r.label)}.</li>
+                ${e.shiny ? '<li>É <b>shiny</b>.</li>' : ''}
+                <li>Nota completa indisponível: desde a atualização, o jogo não
+                    envia multiplicador, natureza, gênero nem IV por atributo
+                    de quem escapa.</li>
+            </ul>
+        </div>`;
+    }
+
     function analiseHtml(e, ctx) {
         const A = analisar(e);
-        if (!A) return `<div class="pp-rt-tip-sec pp-rt-an">
-            <p class="pp-rt-tip-head">Análise</p>
-            <ul class="pp-rt-why"><li>Indisponível: ${escapeHtml(motivoFalha(e, ctx))}.</li></ul>
-        </div>`;
+        if (!A) {
+            const parcial = analiseParcialHtml(e);
+            if (parcial) return parcial;
+            return `<div class="pp-rt-tip-sec pp-rt-an">
+                <p class="pp-rt-tip-head">Análise</p>
+                <ul class="pp-rt-why"><li>Indisponível: ${escapeHtml(motivoFalha(e, ctx))}.</li></ul>
+            </div>`;
+        }
         const r = RARITIES.find(x => x.key === A.tier) || RARITIES[0];
         const arcoTier = [r.color, claro(r.color, 0.55)];
         const arcoEsp = RARITIES.map(x => x.color);
@@ -4099,9 +4226,11 @@
             </div>`;
         };
 
+        // Sem atributos, a seção inteira some em vez de mostrar uma grade
+        // vazia e um aviso — o cartão fica mais curto e não promete nada.
         const atributos = batExibido
             ? BAT_ORDEM.map(([a, b]) => stat(a) + stat(b)).join('')
-            : '<p class="pp-rt-tip-vazio">Sem dados desta captura.</p>';
+            : '';
 
         // Natureza neutra não é omitida: o jogo escreve "Sem efeito".
         const ganho = !nat ? ''
@@ -4139,7 +4268,15 @@
 
             <div class="pp-rt-tip-caixas">
                 <div class="pp-rt-caixa">
-                    <p>Poder total</p><b>${fmt(poderDe(e))}</b>
+                    <p>${poderDe(e) ? 'Poder total' : 'Chance de captura'}</p>
+                    <b>${poderDe(e)
+                        ? fmt(poderDe(e))
+                        // Sem atributos não há poder — mostrar "0" seria dizer
+                        // que o Pokémon não vale nada, que é falso. No lugar
+                        // entra a chance daquela tentativa, que o jogo manda.
+                        : (chanceDe(e) !== null
+                            ? String(Number(chanceDe(e).toFixed(chanceDe(e) >= 1 ? 2 : 3))).replace('.', ',') + '<i>%</i>'
+                            : '—')}</b>
                 </div>
                 <div class="pp-rt-caixa">
                     <p>IV total</p><b>${fmt(e.iv)}<i>/${IV_MAX}</i></b>
@@ -4162,6 +4299,7 @@
 
             ${analiseHtml(e)}
 
+            ${!batExibido ? '' : `
             <div class="pp-rt-tip-sec">
                 <p class="pp-rt-tip-head">Atributos de batalha${projetado
                     ? ' <span class="pp-rt-fonte">— como seriam capturado (Nv. 1)</span>'
@@ -4169,8 +4307,9 @@
                         ? ` <span class="pp-rt-fonte">— no Nv. ${fmt(e.lvl)}; sem projeção: ${escapeHtml(motivoProjecao || 'motivo desconhecido')}</span>`
                         : ''}</p>
                 <div class="pp-rt-bat-grid">${atributos}</div>
-            </div>
+            </div>`}
 
+            ${(!e.nat && !e.gen) ? '' : `
             <div class="pp-rt-tip-sec pp-rt-tip-gen">
                 <p class="pp-rt-tip-head">Genética</p>
                 <div class="pp-rt-stat"><span>Natureza</span>
@@ -4182,7 +4321,7 @@
                     ? `<div class="pp-rt-stat"><span>Ganho/perda</span>
                          <b>${BONUS_GENERO[e.gen]}</b></div>`
                     : ''}
-            </div>`;
+            </div>`}`;
     }
 
     function mostrarTip(linha) {
@@ -4386,6 +4525,23 @@
         if (diag.lastError) parts.push(`erro interno: ${diag.lastError}`);
 
         if (diag.unknownQuality.size) parts.push(`qualidade desconhecida: ${[...diag.unknownQuality].join(', ')}`);
+
+        // Uma linha só, e só quando faz diferença: sem o evento de combate a
+        // extensão perde natureza, gênero e IV por atributo, e o analisador
+        // fica indisponível. Some sozinha se o jogo voltar a mandá-lo.
+        if (diag.connected && totalAtt > 20 && !recebeuCombate) {
+            parts.push('o jogo parou de enviar o detalhe do combate — sem natureza, '
+                + 'gênero e análise');
+        }
+
+        // Evento de combate/captura que a extensão não conhece. Aparece
+        // quando o jogo renomeia ou remodela um evento: sem isto, tudo que
+        // dependia dele some sem deixar pista.
+        // O diagnóstico de eventos novos que existiu na 7.13.1–7.13.3 saiu
+        // daqui. Ele cumpriu o papel — apontou que o jogo trocou o evento de
+        // combate por quadros de animação e que os dados migraram para o
+        // capture.failed — e a partir da 7.14 virava só ruído permanente no
+        // rodapé. O que sobrou é o aviso curto de dado faltando, abaixo.
 
         els.diag.textContent = parts.join(' | ');
         els.diag.classList.toggle('pp-warn', !diag.connected || diag.gaps > 0 || !!diag.lastError);
