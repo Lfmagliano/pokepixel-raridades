@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pokepixel — Aviso no Discord (companheiro)
 // @namespace    https://pokepixel.nietore.com/
-// @version      1.3.0
+// @version      1.4.0
 // @description  Avisa num canal do Discord quando você captura um Pokémon de raridade igual ou acima do limite que você escolher. Complemento OPCIONAL da extensão Pokepixel — Raridades.
 // @author       Lfmagliano
 // @homepageURL  https://github.com/Lfmagliano/pokepixel-raridades
@@ -63,6 +63,7 @@
     const K_MAPA = 'ppd_webhooks_v1';   // { "PADRAO": url, "NomeDaConta": url }
     const K_MIN  = 'ppd_minimo_v1';     // legado: mínimo único, migrado para PADRAO
     const K_MINS = 'ppd_minimos_v1';    // { "PADRAO": "epic", "NomeDaConta": "rare" }
+    const K_MARCA = 'ppd_mencao_v1';    // quem marcar no aviso (id ou menção)
     const K_ON   = 'ppd_ligado_v1';
     const PADRAO = '*';                 // vale para conta sem webhook próprio
 
@@ -168,7 +169,25 @@
 
     const NOMES_IV = ['HP', 'Ataque', 'Defesa', 'Atq. Esp.', 'Def. Esp.', 'Velocidade'];
 
+    // Quem marcar no aviso. Aceita o id cru, a menção de usuário <@123> ou
+    // <@!123>, e a de cargo <@&123> — porque colar direto do Discord dá
+    // qualquer um desses formatos.
+    //
+    // A menção PRECISA ir no texto da mensagem: dentro de um embed ela
+    // aparece azul mas não notifica ninguém. Por isso o aviso vai com as
+    // duas coisas — o `content` com a marcação e o embed com o conteúdo.
+    function lerMencao(txt) {
+        const t = String(txt || '').trim();
+        if (!t) return null;
+        let m = /^<@&(\d{5,25})>$/.exec(t);
+        if (m) return { texto: `<@&${m[1]}>`, roles: [m[1]] };
+        m = /^<@!?(\d{5,25})>$/.exec(t) || /^(\d{5,25})$/.exec(t);
+        if (m) return { texto: `<@${m[1]}>`, users: [m[1]] };
+        return null;
+    }
+
     function montarMensagem(c, conta) {
+        const mencao = lerMencao(ler(K_MARCA, ''));
         const rot = ROTULO[c.q] || c.q;
         const nome = (c.nome && c.nome !== c.sp ? c.nome : c.sp) || '?';
         const titulo = `${nome}${c.shiny ? ' ✦ shiny' : ''} — ${rot}`;
@@ -195,6 +214,13 @@
 
         return {
             username: 'Pokepixel — Raridades',
+            // content com a menção; sem ele o Discord não notifica.
+            // allowed_mentions explícito: só quem foi configurado é marcado,
+            // nunca @everyone por acidente.
+            ...(mencao ? {
+                content: mencao.texto,
+                allowed_mentions: { parse: [], users: mencao.users || [], roles: mencao.roles || [] },
+            } : {}),
             embeds: [{
                 title: titulo,
                 color: COR[c.q] || 0x8b8b95,
@@ -399,6 +425,16 @@
                     <select id="ppd-min"></select>
                 </div>
 
+                <div class="ppd-campo">
+                    <label for="ppd-marca">Marcar quem no aviso</label>
+                    <input id="ppd-marca" type="text" spellcheck="false"
+                           placeholder="seu id do Discord, ou vazio para não marcar" />
+                    <p class="ppd-dica">No Discord: Configurações → Avançado → Modo
+                       desenvolvedor. Depois clique com o botão direito no seu nome →
+                       Copiar ID do usuário. Também aceita &lt;@id&gt; e &lt;@&amp;id&gt;
+                       de cargo.</p>
+                </div>
+
                 <div class="ppd-campo ppd-linha">
                     <label class="ppd-chk"><input id="ppd-on" type="checkbox" /> Avisos ligados</label>
                 </div>
@@ -416,6 +452,7 @@
         ui = {
             fundo, hook: $('ppd-hook'), padrao: $('ppd-hook-padrao'), ver: $('ppd-ver'),
             min: $('ppd-min'), on: $('ppd-on'), status: $('ppd-status'), conta: $('ppd-conta'),
+            marca: $('ppd-marca'),
         };
 
         TIERS.forEach((t, i) => {
@@ -453,6 +490,7 @@
         ui.hook.disabled = !contaDaAba;
         ui.padrao.value = mapa[PADRAO] || '';
         ui.min.value = minimoDe(contaDaAba);
+        ui.marca.value = ler(K_MARCA, '');
         ui.on.checked = !!ler(K_ON, true);
         aviso('');
         ui.fundo.classList.add('ppd-on');
@@ -473,9 +511,19 @@
             definirWebhook(chave, v);
         }
         definirMinimo(contaDaAba || PADRAO, ui.min.value);
+        // Vazio limpa; qualquer outra coisa tem que ser um id ou menção
+        // válida, senão o Discord posta o texto cru e não marca ninguém.
+        const marca = String(ui.marca.value || '').trim();
+        if (marca && !lerMencao(marca)) {
+            aviso('A marcação tem que ser um id do Discord (só números) ou uma '
+                + 'menção como <@123...>.', 'ruim');
+            return;
+        }
+        gravar(K_MARCA, marca);
         gravar(K_ON, !!ui.on.checked);
         aviso('Salvo. Avisando a partir de ' + (ROTULO[ui.min.value] || '?')
-            + (contaDaAba ? ` para a conta ${contaDaAba}.` : ' (padrão).'), 'bom');
+            + (contaDaAba ? ` para a conta ${contaDaAba}` : ' (padrão)')
+            + (marca ? ', marcando você.' : '.'), 'bom');
     }
 
     function testarUi() {
